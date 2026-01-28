@@ -1,0 +1,4 @@
+- [x] tasks.mdからタスク読み取り対応
+- [x] ClaudeTask構造体を削除
+- [ ] サイドバーでtask表示テスト
+- [ ] file watcherでtasks.md変更検知
