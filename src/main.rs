@@ -638,7 +638,7 @@ fn load_sessions_data(stale_threshold_mins: i64) -> Vec<SessionItem> {
             if pane.window_id != current_window_id {
                 continue;
             }
-            let (task_active, task_done, task_total) = read_claude_tasks(&sess.home_cwd);
+            let (task_active, task_done, task_total) = read_claude_tasks(&sess.session_id);
             sessions.push(SessionItem {
                 window_id: pane.window_id,
                 tab_id: pane.tab_id,
@@ -659,7 +659,7 @@ fn load_sessions_data(stale_threshold_mins: i64) -> Vec<SessionItem> {
             // Disconnected session
             let age = now.signed_duration_since(updated_at);
             if age <= chrono::Duration::hours(24) {
-                let (task_active, task_done, task_total) = read_claude_tasks(&sess.home_cwd);
+                let (task_active, task_done, task_total) = read_claude_tasks(&sess.session_id);
                 sessions.push(SessionItem {
                     window_id: -1,
                     tab_id: -1,
@@ -928,41 +928,47 @@ fn get_tty_from_ancestors() -> String {
     String::new()
 }
 
-// Read tasks from spec/plan/tasks.md in the session's cwd
-fn read_claude_tasks(cwd: &str) -> (Option<String>, i32, i32) {
-    let tasks_path = std::path::Path::new(cwd).join("spec/plan/tasks.md");
+// Read tasks from ~/.claude/tasks/<session_id>/*.json
+fn read_claude_tasks(session_id: &str) -> (Option<String>, i32, i32) {
+    let tasks_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".claude/tasks")
+        .join(session_id);
 
-    let content = match fs::read_to_string(&tasks_path) {
-        Ok(c) => c,
+    let entries = match fs::read_dir(&tasks_dir) {
+        Ok(e) => e,
         Err(_) => return (None, 0, 0),
     };
 
-    let mut total = 0i32;
-    let mut completed = 0i32;
-    let mut first_pending: Option<String> = None;
+    #[derive(Deserialize)]
+    struct TaskItem {
+        subject: String,
+        status: String,
+    }
 
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("- [x]") || trimmed.starts_with("- [X]") {
-            total += 1;
-            completed += 1;
-        } else if trimmed.starts_with("- [ ]") {
-            total += 1;
-            if first_pending.is_none() {
-                first_pending = Some(trimmed[5..].trim().to_string());
+    let mut items: Vec<TaskItem> = Vec::new();
+    for entry in entries.flatten() {
+        if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
+            if let Ok(content) = fs::read_to_string(entry.path()) {
+                if let Ok(item) = serde_json::from_str::<TaskItem>(&content) {
+                    items.push(item);
+                }
             }
         }
     }
 
-    if total == 0 {
+    if items.is_empty() {
         return (None, 0, 0);
     }
 
-    let active = if completed == total {
-        None
-    } else {
-        first_pending
-    };
+    let total = items.len() as i32;
+    let completed = items.iter().filter(|t| t.status == "completed").count() as i32;
+
+    let active = items
+        .iter()
+        .find(|t| t.status == "in_progress")
+        .or_else(|| items.iter().find(|t| t.status == "pending"))
+        .map(|t| t.subject.clone());
 
     (active, completed, total)
 }
@@ -1012,17 +1018,8 @@ fn update_session_store(
         .and_then(|s| if s.tty.is_empty() { None } else { Some(s.tty.clone()) })
         .unwrap_or_else(|| tty.to_string());
 
-    // Read tasks from spec/plan/tasks.md
-    let (active_task, tasks_completed, tasks_total) = read_claude_tasks(&home_cwd);
-
-    // Preserve existing task data if not available from Claude Code
-    let (final_active_task, final_tasks_completed, final_tasks_total) = if tasks_total > 0 {
-        (active_task, tasks_completed, tasks_total)
-    } else if let Some(existing) = existing {
-        (existing.active_task.clone(), existing.tasks_completed, existing.tasks_total)
-    } else {
-        (None, 0, 0)
-    };
+    // Read tasks from ~/.claude/tasks/<session_id>/
+    let (active_task, tasks_completed, tasks_total) = read_claude_tasks(session_id);
 
     store.sessions.insert(
         session_id.to_string(),
@@ -1033,9 +1030,9 @@ fn update_session_store(
             status: determine_status(event_name, notification_type, current_status),
             created_at,
             updated_at: now.clone(),
-            active_task: final_active_task,
-            tasks_completed: final_tasks_completed,
-            tasks_total: final_tasks_total,
+            active_task,
+            tasks_completed,
+            tasks_total,
         },
     );
 
