@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
-    io::{self, Read},
+    io,
     path::PathBuf,
     process::Command,
     sync::mpsc,
@@ -28,258 +28,80 @@ use std::{
 };
 
 // ============================================================================
-// Kintone Configuration
+// Asana Tasks Cache
 // ============================================================================
 
-#[derive(Debug, Clone)]
-struct KintoneConfig {
-    domain: String,
-    app_id: String,
-    api_token: String,
+#[derive(Debug, Deserialize)]
+struct AsanaTasksCache {
+    tasks: Vec<AsanaCachedTask>,
 }
 
-fn load_credentials_env() -> HashMap<String, String> {
-    let path = dirs::home_dir()
+#[derive(Debug, Deserialize)]
+struct AsanaCachedTask {
+    gid: String,
+    name: String,
+    assignee: String,
+    completed: bool,
+    #[serde(default = "default_priority")]
+    priority: i32,
+    #[serde(default)]
+    due_on: Option<String>,
+}
+
+fn default_priority() -> i32 {
+    3
+}
+
+fn get_asana_cache_dir() -> PathBuf {
+    dirs::home_dir()
         .unwrap_or_default()
-        .join(".credentials/common.env");
-    let mut map = HashMap::new();
-    if let Ok(content) = fs::read_to_string(&path) {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((key, value)) = line.split_once('=') {
-                let value = value.trim().trim_matches('"').trim_matches('\'');
-                map.insert(key.trim().to_string(), value.to_string());
-            }
-        }
-    }
-    map
+        .join(".config/ambient-task-agent")
 }
 
-fn load_kintone_config() -> Option<KintoneConfig> {
-    let env = load_credentials_env();
-    let domain = env.get("KINTONE_DOMAIN")?.clone();
-    let app_id = env.get("KINTONE_APP_ID_TASKS")?.clone();
-    let api_token = env.get("KINTONE_API_TOKEN")?.clone();
-    if domain.is_empty() || app_id.is_empty() || api_token.is_empty() {
-        return None;
-    }
-    Some(KintoneConfig {
-        domain,
-        app_id,
-        api_token,
-    })
+fn get_asana_cache_path() -> PathBuf {
+    get_asana_cache_dir().join("tasks-cache.json")
 }
 
-// ============================================================================
-// Kintone API
-// ============================================================================
-
-#[derive(Debug, Deserialize)]
-struct KintoneRecordsResponse {
-    records: Vec<KintoneRecord>,
-}
-
-#[derive(Debug, Deserialize)]
-struct KintoneRecord {
-    #[serde(rename = "$id")]
-    id: KintoneFieldValue,
-    #[serde(rename = "タイトル")]
-    title: KintoneFieldValue,
-    status: KintoneFieldValue,
-    #[serde(rename = "優先度")]
-    priority: KintoneFieldValue,
-    #[serde(rename = "期限")]
-    deadline: KintoneFieldValue,
-    #[serde(rename = "作成日時")]
-    created_at: KintoneFieldValue,
-}
-
-#[derive(Debug, Deserialize)]
-struct KintoneFieldValue {
-    value: Option<String>,
-}
-
-fn fetch_kintone_tasks(config: &KintoneConfig) -> Vec<GlobalTask> {
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-    {
+fn load_asana_tasks() -> Vec<GlobalTask> {
+    let path = get_asana_cache_path();
+    let content = match fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
 
-    let query = "status in (\"todo\", \"in_progress\") order by 作成日時 desc limit 20";
-    let url = format!(
-        "https://{}/k/v1/records.json?app={}&query={}",
-        config.domain,
-        config.app_id,
-        urlencoded(query)
-    );
-
-    let resp = client
-        .get(&url)
-        .header("X-Cybozu-API-Token", &config.api_token)
-        .send();
-
-    let records: Vec<KintoneRecord> = match resp {
-        Ok(r) => match r.json::<KintoneRecordsResponse>() {
-            Ok(data) => data.records,
-            Err(_) => return Vec::new(),
-        },
+    let cache: AsanaTasksCache = match serde_json::from_str(&content) {
+        Ok(c) => c,
         Err(_) => return Vec::new(),
     };
 
-    let now = Utc::now();
-    let mut tasks: Vec<(f64, GlobalTask)> = records
+    let user_name = std::env::var("ASANA_USER_NAME").unwrap_or_default();
+
+    // キャッシュは優先度順にソート済み。フィルタのみ行う。
+    cache
+        .tasks
         .into_iter()
-        .map(|r| {
-            let id = r.id.value.unwrap_or_default();
-            let title = r.title.value.unwrap_or_default();
-            let status_raw = r.status.value.unwrap_or_default();
-            let priority_str = r.priority.value.unwrap_or_default();
-            let deadline_str = r.deadline.value.unwrap_or_default();
-            let created_str = r.created_at.value.unwrap_or_default();
-
-            let status = match status_raw.as_str() {
-                "in_progress" => "in_progress",
-                _ => "pending",
+        .filter(|t| {
+            if t.completed {
+                return false;
             }
-            .to_string();
-
-            // Priority mapping
-            let priority = match priority_str.as_str() {
-                "urgent" => 1,
-                "this_week" => 2,
-                _ => 3, // someday
-            };
-
-            // Priority score calculation
-            let base_score: f64 = match priority_str.as_str() {
-                "urgent" => 100.0,
-                "this_week" => 50.0,
-                _ => 10.0,
-            };
-
-            // Deadline bonus
-            let deadline_score = if !deadline_str.is_empty() {
-                if let Ok(dl) = DateTime::parse_from_rfc3339(&deadline_str) {
-                    let days_left = dl.signed_duration_since(now).num_days();
-                    if days_left < 0 {
-                        30.0 // overdue
-                    } else if days_left <= 1 {
-                        20.0
-                    } else if days_left <= 3 {
-                        10.0
-                    } else {
-                        0.0
-                    }
-                } else {
-                    // Try YYYY-MM-DD format
-                    if let Ok(dl) = chrono::NaiveDate::parse_from_str(&deadline_str, "%Y-%m-%d") {
-                        let today = now.date_naive();
-                        let days_left = (dl - today).num_days();
-                        if days_left < 0 {
-                            30.0
-                        } else if days_left <= 1 {
-                            20.0
-                        } else if days_left <= 3 {
-                            10.0
-                        } else {
-                            0.0
-                        }
-                    } else {
-                        0.0
-                    }
-                }
-            } else {
-                0.0
-            };
-
-            // Staleness penalty (older = higher priority bump)
-            let stale_score = if !created_str.is_empty() {
-                if let Ok(ct) = DateTime::parse_from_rfc3339(&created_str) {
-                    let days_old = now.signed_duration_since(ct).num_days();
-                    (days_old as f64 * 0.5).min(15.0)
-                } else {
-                    0.0
-                }
-            } else {
-                0.0
-            };
-
-            let score = base_score + deadline_score + stale_score;
-
-            let task = GlobalTask {
-                id,
-                title,
-                status,
-                priority,
-                created_at: created_str,
-                updated_at: String::new(),
-            };
-
-            (score, task)
+            if t.assignee.contains("田澤") {
+                return true;
+            }
+            if !user_name.is_empty() && t.assignee.contains(&user_name) {
+                return true;
+            }
+            false
         })
-        .collect();
-
-    // Sort by score descending
-    tasks.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    tasks.into_iter().map(|(_, t)| t).collect()
-}
-
-fn update_kintone_task_status(config: &KintoneConfig, record_id: &str, new_status: &str) {
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    let url = format!("https://{}/k/v1/record.json", config.domain);
-
-    let mut record_fields = serde_json::Map::new();
-    record_fields.insert(
-        "status".to_string(),
-        serde_json::json!({"value": new_status}),
-    );
-    if new_status == "done" {
-        record_fields.insert(
-            "completed_at".to_string(),
-            serde_json::json!({"value": Utc::now().to_rfc3339()}),
-        );
-    }
-
-    let body = serde_json::json!({
-        "app": config.app_id,
-        "id": record_id,
-        "record": record_fields,
-    });
-
-    let _ = client
-        .put(&url)
-        .header("X-Cybozu-API-Token", &config.api_token)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send();
-}
-
-fn urlencoded(s: &str) -> String {
-    let mut result = String::new();
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(b as char);
-            }
-            _ => {
-                result.push_str(&format!("%{:02X}", b));
-            }
-        }
-    }
-    result
+        .map(|t| GlobalTask {
+            id: t.gid,
+            title: t.name,
+            status: "pending".to_string(),
+            priority: t.priority,
+            due_on: t.due_on,
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -330,13 +152,6 @@ struct Session {
     tasks_total: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct HookPayload {
-    session_id: String,
-    cwd: Option<String>,
-    notification_type: Option<String>,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 struct WezTermPane {
     window_id: i32,
@@ -345,7 +160,6 @@ struct WezTermPane {
     tty_name: String,
     #[allow(dead_code)]
     title: String,
-    cwd: String,
     is_active: bool,
 }
 
@@ -359,7 +173,8 @@ struct UsageResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UsageData {
     utilization: f64,
-    resets_at: String,
+    #[serde(default)]
+    resets_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -376,14 +191,12 @@ struct OAuthData {
 
 #[derive(Debug, Clone)]
 struct SessionItem {
-    window_id: i32,
     tab_id: i32,
     pane_id: i32,
     name: String,
-    #[allow(dead_code)]
-    cwd: String,
     status: String,
     is_current: bool,
+    created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     is_stale: bool,
     session_id: String,
@@ -410,6 +223,7 @@ struct GlobalTask {
     title: String,
     status: String, // pending, in_progress, completed
     priority: i32,  // 1=high, 2=medium, 3=low
+    due_on: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -435,7 +249,9 @@ struct App {
     focus_mode: FocusMode,
     should_quit: bool,
     show_help: bool,
-    kintone_config: Option<KintoneConfig>,
+    show_preview: bool,
+    pane_preview: Vec<String>,
+    preview_scroll: u16,
 }
 
 impl App {
@@ -460,7 +276,9 @@ impl App {
             focus_mode: FocusMode::Sessions,
             should_quit: false,
             show_help: false,
-            kintone_config: load_kintone_config(),
+            show_preview: false,
+            pane_preview: Vec::new(),
+            preview_scroll: 0,
         }
     }
 
@@ -538,14 +356,14 @@ impl App {
 // File Paths
 // ============================================================================
 
-fn get_data_dir() -> PathBuf {
+fn get_sessions_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
-        .join(".config/wez-sidebar")
+        .join(".config/ambient-task-agent")
 }
 
 fn get_sessions_file_path() -> PathBuf {
-    get_data_dir().join("sessions.json")
+    get_sessions_dir().join("sessions.json")
 }
 
 // ============================================================================
@@ -629,6 +447,9 @@ fn load_sessions_data(stale_threshold_mins: i64) -> Vec<SessionItem> {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| sess.home_cwd.clone());
 
+        let created_at = DateTime::parse_from_rfc3339(&sess.created_at)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or(now);
         let updated_at = DateTime::parse_from_rfc3339(&sess.updated_at)
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or(now);
@@ -638,43 +459,39 @@ fn load_sessions_data(stale_threshold_mins: i64) -> Vec<SessionItem> {
             if pane.window_id != current_window_id {
                 continue;
             }
-            let (task_active, task_done, task_total) = read_claude_tasks(&sess.session_id);
             sessions.push(SessionItem {
-                window_id: pane.window_id,
                 tab_id: pane.tab_id,
                 pane_id: pane.pane_id,
                 name,
-                cwd: sess.home_cwd.clone(),
                 status: sess.status.clone(),
                 is_current: pane.pane_id == current_pane_id,
+                created_at,
                 updated_at,
                 is_stale,
                 session_id: sess.session_id.clone(),
                 is_disconnected: false,
-                active_task: task_active,
-                tasks_completed: task_done,
-                tasks_total: task_total,
+                active_task: sess.active_task.clone(),
+                tasks_completed: sess.tasks_completed,
+                tasks_total: sess.tasks_total,
             });
         } else {
             // Disconnected session
             let age = now.signed_duration_since(updated_at);
             if age <= chrono::Duration::hours(24) {
-                let (task_active, task_done, task_total) = read_claude_tasks(&sess.session_id);
                 sessions.push(SessionItem {
-                    window_id: -1,
                     tab_id: -1,
                     pane_id: -1,
                     name,
-                    cwd: sess.home_cwd.clone(),
                     status: sess.status.clone(),
                     is_current: false,
+                    created_at,
                     updated_at,
                     is_stale,
                     session_id: sess.session_id.clone(),
                     is_disconnected: true,
-                    active_task: task_active,
-                    tasks_completed: task_done,
-                    tasks_total: task_total,
+                    active_task: sess.active_task.clone(),
+                    tasks_completed: sess.tasks_completed,
+                    tasks_total: sess.tasks_total,
                 });
             }
         }
@@ -692,6 +509,44 @@ fn load_sessions_data(stale_threshold_mins: i64) -> Vec<SessionItem> {
     });
 
     sessions
+}
+
+fn get_pane_text(pane_id: i32) -> Vec<String> {
+    if pane_id < 0 {
+        return vec!["(disconnected)".to_string()];
+    }
+
+    let output = Command::new("/opt/homebrew/bin/wezterm")
+        .args(["cli", "get-text", "--pane-id", &pane_id.to_string()])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            // Trim trailing empty lines, keep last meaningful lines
+            let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+            // Find last non-empty line
+            let last_non_empty = lines.iter().rposition(|l| !l.trim().is_empty()).unwrap_or(0);
+            lines[..=last_non_empty].to_vec()
+        }
+        _ => vec!["(取得失敗)".to_string()],
+    }
+}
+
+fn update_preview(app: &mut App) {
+    let visible = app.visible_sessions();
+    if let Some(idx) = app.session_state.selected() {
+        if idx < visible.len() {
+            let pane_id = visible[idx].pane_id;
+            app.pane_preview = get_pane_text(pane_id);
+            // Auto-scroll to bottom
+            app.preview_scroll = app.pane_preview.len().saturating_sub(1) as u16;
+        } else {
+            app.pane_preview.clear();
+        }
+    } else {
+        app.pane_preview.clear();
+    }
 }
 
 fn activate_pane(session: &SessionItem) {
@@ -788,9 +643,13 @@ fn load_usage_data() -> UsageLimits {
     if let Ok(resp) = response {
         if let Ok(usage) = resp.json::<UsageResponse>() {
             result.five_hour = usage.five_hour.utilization as i32;
-            result.five_hour_reset = calculate_reset_time(&usage.five_hour.resets_at);
+            if let Some(ref r) = usage.five_hour.resets_at {
+                result.five_hour_reset = calculate_reset_time(r);
+            }
             result.weekly = usage.seven_day.utilization as i32;
-            result.weekly_reset = format_reset_day(&usage.seven_day.resets_at);
+            if let Some(ref r) = usage.seven_day.resets_at {
+                result.weekly_reset = format_reset_day(r);
+            }
             if let Some(sonnet) = usage.seven_day_sonnet {
                 result.sonnet = sonnet.utilization as i32;
             }
@@ -837,207 +696,13 @@ fn format_reset_day(resets_at: &str) -> String {
 }
 
 // ============================================================================
-// Hook Handling
+// Hook Handling (stub - session management moved to ambient-task-agent)
 // ============================================================================
 
-const VALID_HOOK_EVENTS: &[&str] = &[
-    "PreToolUse",
-    "PostToolUse",
-    "Notification",
-    "Stop",
-    "UserPromptSubmit",
-];
-
-fn read_stdin_with_timeout(timeout: Duration) -> String {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let mut input = String::new();
-        let _ = io::stdin().read_to_string(&mut input);
-        let _ = tx.send(input);
-    });
-
-    rx.recv_timeout(timeout).unwrap_or_default()
-}
-
-fn handle_hook(event_name: &str) -> Result<()> {
-    if !VALID_HOOK_EVENTS.contains(&event_name) {
-        anyhow::bail!("Invalid event name: {}", event_name);
-    }
-
-    let tty = get_tty_from_ancestors();
-
-    let input = read_stdin_with_timeout(Duration::from_secs(2));
-
-    if input.is_empty() {
-        println!("{{}}");
-        return Ok(());
-    }
-
-    let payload: HookPayload = serde_json::from_str(&input)?;
-
-    if payload.session_id.is_empty() {
-        anyhow::bail!("Missing session_id");
-    }
-
-    let cwd = payload
-        .cwd
-        .unwrap_or_else(|| std::env::current_dir().unwrap().to_string_lossy().to_string());
-
-    update_session_store(
-        event_name,
-        &payload.session_id,
-        &cwd,
-        &tty,
-        payload.notification_type.as_deref(),
-    )?;
-
+fn handle_hook(_event_name: &str) -> Result<()> {
+    // セッション管理はambient-task-agentに移行済み
+    // 互換性のため空のJSONを返すだけ
     println!("{{}}");
-    Ok(())
-}
-
-fn get_tty_from_ancestors() -> String {
-    let mut ppid = std::os::unix::process::parent_id() as i32;
-
-    for _ in 0..5 {
-        let output = Command::new("ps")
-            .args(["-o", "tty=", "-p", &ppid.to_string()])
-            .output();
-
-        if let Ok(out) = output {
-            let tty = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !tty.is_empty() && tty != "??" {
-                return format!("/dev/{}", tty);
-            }
-        }
-
-        let output = Command::new("ps")
-            .args(["-o", "ppid=", "-p", &ppid.to_string()])
-            .output();
-
-        if let Ok(out) = output {
-            if let Ok(new_ppid) = String::from_utf8_lossy(&out.stdout).trim().parse::<i32>() {
-                ppid = new_ppid;
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    String::new()
-}
-
-// Read tasks from ~/.claude/tasks/<session_id>/*.json
-fn read_claude_tasks(session_id: &str) -> (Option<String>, i32, i32) {
-    let tasks_dir = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".claude/tasks")
-        .join(session_id);
-
-    let entries = match fs::read_dir(&tasks_dir) {
-        Ok(e) => e,
-        Err(_) => return (None, 0, 0),
-    };
-
-    #[derive(Deserialize)]
-    struct TaskItem {
-        subject: String,
-        status: String,
-    }
-
-    let mut items: Vec<TaskItem> = Vec::new();
-    for entry in entries.flatten() {
-        if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
-            if let Ok(content) = fs::read_to_string(entry.path()) {
-                if let Ok(item) = serde_json::from_str::<TaskItem>(&content) {
-                    items.push(item);
-                }
-            }
-        }
-    }
-
-    if items.is_empty() {
-        return (None, 0, 0);
-    }
-
-    let total = items.len() as i32;
-    let completed = items.iter().filter(|t| t.status == "completed").count() as i32;
-
-    let active = items
-        .iter()
-        .find(|t| t.status == "in_progress")
-        .or_else(|| items.iter().find(|t| t.status == "pending"))
-        .map(|t| t.subject.clone());
-
-    (active, completed, total)
-}
-
-fn determine_status(event_name: &str, notification_type: Option<&str>, current_status: &str) -> String {
-    if event_name == "Stop" {
-        return "stopped".to_string();
-    }
-    if event_name == "UserPromptSubmit" {
-        return "running".to_string();
-    }
-    if current_status == "stopped" {
-        return "stopped".to_string();
-    }
-    if event_name == "PreToolUse" {
-        return "running".to_string();
-    }
-    if event_name == "Notification" && notification_type == Some("permission_prompt") {
-        return "waiting_input".to_string();
-    }
-    "running".to_string()
-}
-
-fn update_session_store(
-    event_name: &str,
-    session_id: &str,
-    cwd: &str,
-    tty: &str,
-    notification_type: Option<&str>,
-) -> Result<()> {
-    let mut store = read_session_store();
-    let now = Utc::now().to_rfc3339();
-
-    // Clean up sessions with same TTY but different session_id
-    if !tty.is_empty() {
-        store.sessions.retain(|k, s| s.tty != tty || k == session_id);
-    }
-
-    let existing = store.sessions.get(session_id);
-    let current_status = existing.map(|s| s.status.as_str()).unwrap_or("");
-    let created_at = existing
-        .map(|s| s.created_at.clone())
-        .unwrap_or_else(|| now.clone());
-    // Always use the hook's cwd as home_cwd (= Claude Code's working directory)
-    let home_cwd = cwd.to_string();
-    let final_tty = existing
-        .and_then(|s| if s.tty.is_empty() { None } else { Some(s.tty.clone()) })
-        .unwrap_or_else(|| tty.to_string());
-
-    // Read tasks from ~/.claude/tasks/<session_id>/
-    let (active_task, tasks_completed, tasks_total) = read_claude_tasks(session_id);
-
-    store.sessions.insert(
-        session_id.to_string(),
-        Session {
-            session_id: session_id.to_string(),
-            home_cwd,
-            tty: final_tty,
-            status: determine_status(event_name, notification_type, current_status),
-            created_at,
-            updated_at: now.clone(),
-            active_task,
-            tasks_completed,
-            tasks_total,
-        },
-    );
-
-    store.updated_at = now;
-    write_session_store(&store)?;
     Ok(())
 }
 
@@ -1046,20 +711,39 @@ fn update_session_store(
 // ============================================================================
 
 fn ui(frame: &mut Frame, app: &mut App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),  // Usage (time + 5h + weekly)
-            Constraint::Length(7),  // Tasks (5 items)
-            Constraint::Min(10),    // Sessions
-            Constraint::Length(1),  // Status bar
-        ])
-        .split(frame.area());
+    if app.show_preview {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(5),  // Usage
+                Constraint::Length(12), // Tasks (10 items)
+                Constraint::Min(5),     // Sessions (smaller)
+                Constraint::Length(12), // Preview
+                Constraint::Length(1),  // Status bar
+            ])
+            .split(frame.area());
 
-    render_usage(frame, app, chunks[0]);
-    render_tasks(frame, app, chunks[1]);
-    render_sessions(frame, app, chunks[2]);
-    render_status_bar(frame, app, chunks[3]);
+        render_usage(frame, app, chunks[0]);
+        render_tasks(frame, app, chunks[1]);
+        render_sessions(frame, app, chunks[2]);
+        render_preview(frame, app, chunks[3]);
+        render_status_bar(frame, chunks[4]);
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(5),  // Usage
+                Constraint::Length(12), // Tasks (10 items)
+                Constraint::Min(10),    // Sessions
+                Constraint::Length(1),  // Status bar
+            ])
+            .split(frame.area());
+
+        render_usage(frame, app, chunks[0]);
+        render_tasks(frame, app, chunks[1]);
+        render_sessions(frame, app, chunks[2]);
+        render_status_bar(frame, chunks[3]);
+    }
 
     if app.show_help {
         render_help_popup(frame, app);
@@ -1114,9 +798,11 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
     let active_count = app.global_tasks.iter().filter(|t| t.status != "completed").count();
     let total_count = app.global_tasks.len();
 
-    let items: Vec<ListItem> = if app.kintone_config.is_none() {
+    let cache_exists = get_asana_cache_path().exists();
+
+    let items: Vec<ListItem> = if !cache_exists && app.global_tasks.is_empty() {
         vec![ListItem::new(Span::styled(
-            "kintone未設定",
+            "キャッシュなし (sync必要)",
             Style::default().fg(Color::DarkGray),
         ))]
     } else if app.global_tasks.is_empty() {
@@ -1125,6 +811,7 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(Color::DarkGray),
         ))]
     } else {
+        let today = Local::now().date_naive();
         app.global_tasks
             .iter()
             .map(|task| {
@@ -1135,7 +822,27 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
                 };
                 let status_text = if task.status == "in_progress" { " ▶" } else { "" };
                 let title = truncate_name(&task.title, 24);
-                ListItem::new(format!("{} {}{}", priority_icon, title, status_text))
+                let text = format!("{} {}{}", priority_icon, title, status_text);
+
+                // Color based on deadline
+                let color = if let Some(ref due) = task.due_on {
+                    if let Ok(due_date) = chrono::NaiveDate::parse_from_str(due, "%Y-%m-%d") {
+                        let days_left = (due_date - today).num_days();
+                        if days_left < 0 {
+                            Color::Red        // overdue
+                        } else if days_left <= 3 {
+                            Color::Yellow     // due soon
+                        } else {
+                            Color::Reset
+                        }
+                    } else {
+                        Color::Reset
+                    }
+                } else {
+                    Color::Reset
+                };
+
+                ListItem::new(Span::styled(text, Style::default().fg(color)))
             })
             .collect()
     };
@@ -1166,6 +873,16 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut app.task_state);
 }
 
+fn format_duration(created_at: &DateTime<Utc>) -> String {
+    let elapsed = Utc::now().signed_duration_since(*created_at);
+    let mins = elapsed.num_minutes();
+    if mins < 60 {
+        format!("{}m", mins)
+    } else {
+        format!("{}h{}m", mins / 60, mins % 60)
+    }
+}
+
 fn render_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible = app.visible_sessions();
 
@@ -1193,10 +910,12 @@ fn render_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
                 _ => " ",
             };
 
+            let duration = format_duration(&sess.created_at);
+
             if sess.tasks_total > 0 {
                 let progress_bar = render_progress_bar(sess.tasks_completed, sess.tasks_total, 10);
                 lines.push(Line::from(Span::styled(
-                    format!("  {} {} {}/{}", status_icon, progress_bar, sess.tasks_completed, sess.tasks_total),
+                    format!("  {} {} {} {}/{}", status_icon, duration, progress_bar, sess.tasks_completed, sess.tasks_total),
                     Style::default().fg(Color::Cyan),
                 )));
                 // Line 3: Active task name
@@ -1213,17 +932,17 @@ fn render_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
             } else if sess.is_disconnected {
                 lines.push(Line::from(Span::styled(
-                    format!("  {} (disconnected)", status_icon),
+                    format!("  {} {} (disconnected)", status_icon, duration),
                     Style::default().fg(Color::DarkGray),
                 )));
             } else if sess.is_stale {
                 lines.push(Line::from(Span::styled(
-                    format!("  {} (stale)", status_icon),
+                    format!("  {} {} (stale)", status_icon, duration),
                     Style::default().fg(Color::DarkGray),
                 )));
             } else {
                 lines.push(Line::from(Span::styled(
-                    format!("  {}", status_icon),
+                    format!("  {} {}", status_icon, duration),
                     Style::default().fg(Color::DarkGray),
                 )));
             }
@@ -1265,7 +984,37 @@ fn render_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut app.session_state);
 }
 
-fn render_status_bar(frame: &mut Frame, app: &App, area: Rect) {
+fn render_preview(frame: &mut Frame, app: &App, area: Rect) {
+    let inner_height = area.height.saturating_sub(2) as usize; // border top+bottom
+
+    // Show last N lines (scroll from bottom)
+    let total_lines = app.pane_preview.len();
+    let max_scroll = total_lines.saturating_sub(inner_height) as u16;
+    let scroll = app.preview_scroll.min(max_scroll);
+
+    let start = scroll as usize;
+    let end = (start + inner_height).min(total_lines);
+
+    let lines: Vec<Line> = if app.pane_preview.is_empty() {
+        vec![Line::from(Span::styled(
+            "(no data)",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        app.pane_preview[start..end]
+            .iter()
+            .map(|l| Line::from(l.as_str()))
+            .collect()
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" 👁 Preview ");
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+fn render_status_bar(frame: &mut Frame, area: Rect) {
     // Minimal status bar for narrow sidebar
     let text = "?:help q:quit";
     let style = Style::default().fg(Color::DarkGray);
@@ -1278,10 +1027,8 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
 
     let lines = if app.focus_mode == FocusMode::Tasks {
         vec![
-            Line::from(" 📋 Tasks Mode (kintone)"),
+            Line::from(" 📋 Tasks Mode (Asana)"),
             Line::from(""),
-            Line::from(" s     タスク開始"),
-            Line::from(" d     タスク完了"),
             Line::from(" j/k   上下移動"),
             Line::from(" Esc   セッションに戻る"),
             Line::from(" q     終了"),
@@ -1293,6 +1040,7 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
             Line::from(" 🖥 Sessions Mode"),
             Line::from(""),
             Line::from(" t       タスクモード"),
+            Line::from(" p       プレビュー切替"),
             Line::from(" Enter   ペイン切替"),
             Line::from(" 1-9     番号でペイン切替"),
             Line::from(" d       セッション削除"),
@@ -1337,7 +1085,7 @@ enum AppEvent {
     Tick,
     Key(event::KeyEvent),
     SessionsUpdated,
-    KintoneTasksUpdated(Vec<GlobalTask>),
+    AsanaTasksUpdated(Vec<GlobalTask>),
     UsageUpdated(UsageLimits),
 }
 
@@ -1389,14 +1137,33 @@ fn run_tui() -> Result<()> {
         }
     });
 
-    // Kintone tasks: initial load only (further updates triggered by user actions)
-    if let Some(kintone_cfg) = app.kintone_config.clone() {
-        let tx_kintone = tx.clone();
-        thread::spawn(move || {
-            let tasks = fetch_kintone_tasks(&kintone_cfg);
-            let _ = tx_kintone.send(AppEvent::KintoneTasksUpdated(tasks));
-        });
-    }
+    // Asana tasks: initial load from cache
+    app.global_tasks = load_asana_tasks();
+
+    // File watcher for Asana tasks cache
+    let tx_asana = tx.clone();
+    let asana_cache_dir = get_asana_cache_dir();
+    thread::spawn(move || {
+        let (watcher_tx, watcher_rx) = mpsc::channel();
+        let mut watcher: RecommendedWatcher =
+            Watcher::new(watcher_tx, NotifyConfig::default()).unwrap();
+        let _ = fs::create_dir_all(&asana_cache_dir);
+        let _ = watcher.watch(&asana_cache_dir, RecursiveMode::NonRecursive);
+
+        loop {
+            if let Ok(Ok(event)) = watcher_rx.recv() {
+                if event
+                    .paths
+                    .iter()
+                    .any(|p| p.file_name().map(|n| n == "tasks-cache.json").unwrap_or(false))
+                {
+                    thread::sleep(Duration::from_millis(200));
+                    let tasks = load_asana_tasks();
+                    let _ = tx_asana.send(AppEvent::AsanaTasksUpdated(tasks));
+                }
+            }
+        }
+    });
 
     // Usage refresh thread (also handles initial load)
     let tx_usage = tx.clone();
@@ -1425,12 +1192,17 @@ fn run_tui() -> Result<()> {
     });
 
     // Main loop
+    let mut tick_count: u32 = 0;
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
 
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(AppEvent::Tick) => {
-                // Just redraw for clock update
+                tick_count = tick_count.wrapping_add(1);
+                // Refresh preview every 3 seconds
+                if app.show_preview && tick_count % 3 == 0 {
+                    update_preview(&mut app);
+                }
             }
             Ok(AppEvent::Key(key)) => {
                 if app.show_help {
@@ -1442,7 +1214,7 @@ fn run_tui() -> Result<()> {
             Ok(AppEvent::SessionsUpdated) => {
                 app.sessions = load_sessions_data(30);
             }
-            Ok(AppEvent::KintoneTasksUpdated(tasks)) => {
+            Ok(AppEvent::AsanaTasksUpdated(tasks)) => {
                 app.global_tasks = tasks;
             }
             Ok(AppEvent::UsageUpdated(usage)) => {
@@ -1486,11 +1258,15 @@ fn handle_sessions_key(app: &mut App, key: event::KeyEvent) {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('t') => app.focus_mode = FocusMode::Tasks,
         KeyCode::Char('f') => app.show_stale = !app.show_stale,
+        KeyCode::Char('p') => {
+            app.show_preview = !app.show_preview;
+            if app.show_preview {
+                update_preview(app);
+            }
+        }
         KeyCode::Char('r') => {
             app.sessions = load_sessions_data(30);
-            if let Some(ref config) = app.kintone_config {
-                app.global_tasks = fetch_kintone_tasks(config);
-            }
+            app.global_tasks = load_asana_tasks();
             app.usage = load_usage_data();
         }
         KeyCode::Char('d') => {
@@ -1502,8 +1278,18 @@ fn handle_sessions_key(app: &mut App, key: event::KeyEvent) {
                 }
             }
         }
-        KeyCode::Up | KeyCode::Char('k') => app.previous_session(),
-        KeyCode::Down | KeyCode::Char('j') => app.next_session(),
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.previous_session();
+            if app.show_preview {
+                update_preview(app);
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.next_session();
+            if app.show_preview {
+                update_preview(app);
+            }
+        }
         KeyCode::Enter => {
             let visible = app.visible_sessions();
             if let Some(idx) = app.session_state.selected() {
@@ -1528,30 +1314,6 @@ fn handle_tasks_key(app: &mut App, key: event::KeyEvent) {
     match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Esc => app.focus_mode = FocusMode::Sessions,
-        KeyCode::Char('s') => {
-            if let (Some(idx), Some(ref config)) = (app.task_state.selected(), &app.kintone_config) {
-                if idx < app.global_tasks.len() {
-                    let id = app.global_tasks[idx].id.clone();
-                    let config = config.clone();
-                    update_kintone_task_status(&config, &id, "in_progress");
-                    app.global_tasks = fetch_kintone_tasks(&config);
-                }
-            }
-        }
-        KeyCode::Char('d') => {
-            if let (Some(idx), Some(ref config)) = (app.task_state.selected(), &app.kintone_config) {
-                if idx < app.global_tasks.len() {
-                    let id = app.global_tasks[idx].id.clone();
-                    let config = config.clone();
-                    update_kintone_task_status(&config, &id, "done");
-                    app.global_tasks = fetch_kintone_tasks(&config);
-                    if !app.global_tasks.is_empty() {
-                        let new_idx = idx.min(app.global_tasks.len() - 1);
-                        app.task_state.select(Some(new_idx));
-                    }
-                }
-            }
-        }
         KeyCode::Up | KeyCode::Char('k') => app.previous_task(),
         KeyCode::Down | KeyCode::Char('j') => app.next_task(),
         _ => {}
