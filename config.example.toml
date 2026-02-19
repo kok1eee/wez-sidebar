@@ -1,0 +1,40 @@
+# wez-sidebar configuration
+# Copy to ~/.config/wez-sidebar/config.toml and customize.
+# All values are optional; defaults are used when omitted.
+
+# WezTerm binary path (auto-detected via `which wezterm` if omitted)
+# wezterm_path = "/opt/homebrew/bin/wezterm"
+
+# Session stale threshold in minutes (default: 30)
+# stale_threshold_mins = 30
+
+# Data directory for sessions.json (default: ~/.config/wez-sidebar)
+# data_dir = "~/.config/wez-sidebar"
+
+# --------------------------------------------------------------------------
+# Hook command
+# --------------------------------------------------------------------------
+# By default, wez-sidebar uses its built-in hook handler to manage
+# sessions.json. Set hook_command to delegate to an external program instead.
+#
+# hook_command = "ambient-task-agent hook"
+#
+# Hook setup in ~/.claude/settings.json:
+#   "hooks": {
+#     "PreToolUse":        [{ "command": "wez-sidebar hook PreToolUse" }],
+#     "PostToolUse":       [{ "command": "wez-sidebar hook PostToolUse" }],
+#     "Notification":      [{ "command": "wez-sidebar hook Notification" }],
+#     "Stop":              [{ "command": "wez-sidebar hook Stop" }],
+#     "UserPromptSubmit":  [{ "command": "wez-sidebar hook UserPromptSubmit" }]
+#   }
+
+# --------------------------------------------------------------------------
+# Tasks
+# --------------------------------------------------------------------------
+# Path to a tasks cache JSON file. If omitted, the Tasks panel shows
+# "tasks_file 未設定" and no file watcher is started.
+#
+# tasks_file = "~/.config/wez-sidebar/tasks-cache.json"
+
+# Task filter: only show tasks where assignee contains this name
+# task_filter_name = "Your Name"

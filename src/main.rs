@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
-    io,
+    io::{self, Read as _},
     path::PathBuf,
     process::Command,
     sync::mpsc,
@@ -28,16 +28,79 @@ use std::{
 };
 
 // ============================================================================
-// Asana Tasks Cache
+// Configuration
+// ============================================================================
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct AppConfig {
+    wezterm_path: String,
+    task_filter_name: Option<String>,
+    stale_threshold_mins: i64,
+    data_dir: String,
+    /// External hook command (uses built-in session handler if omitted)
+    hook_command: Option<String>,
+    /// Tasks cache file path (no tasks shown if omitted)
+    tasks_file: Option<String>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        let wezterm_path = Command::new("which")
+            .arg("wezterm")
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "wezterm".to_string());
+
+        Self {
+            wezterm_path,
+            task_filter_name: None,
+            stale_threshold_mins: 30,
+            data_dir: "~/.config/wez-sidebar".to_string(),
+            hook_command: None,
+            tasks_file: None,
+        }
+    }
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
+fn load_config() -> AppConfig {
+    let config_path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".config/wez-sidebar/config.toml");
+
+    match fs::read_to_string(&config_path) {
+        Ok(content) => toml::from_str(&content).unwrap_or_default(),
+        Err(_) => AppConfig::default(),
+    }
+}
+
+// ============================================================================
+// Tasks Cache
 // ============================================================================
 
 #[derive(Debug, Deserialize)]
-struct AsanaTasksCache {
-    tasks: Vec<AsanaCachedTask>,
+struct TasksCache {
+    tasks: Vec<CachedTask>,
 }
 
 #[derive(Debug, Deserialize)]
-struct AsanaCachedTask {
+struct CachedTask {
     gid: String,
     name: String,
     assignee: String,
@@ -52,31 +115,21 @@ fn default_priority() -> i32 {
     3
 }
 
-fn get_asana_cache_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".config/ambient-task-agent")
-}
-
-fn get_asana_cache_path() -> PathBuf {
-    get_asana_cache_dir().join("tasks-cache.json")
-}
-
-fn load_asana_tasks() -> Vec<GlobalTask> {
-    let path = get_asana_cache_path();
+fn load_tasks(config: &AppConfig) -> Vec<GlobalTask> {
+    let path = match config.tasks_file {
+        Some(ref p) => expand_tilde(p),
+        None => return Vec::new(),
+    };
     let content = match fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
 
-    let cache: AsanaTasksCache = match serde_json::from_str(&content) {
+    let cache: TasksCache = match serde_json::from_str(&content) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
 
-    let user_name = std::env::var("ASANA_USER_NAME").unwrap_or_default();
-
-    // キャッシュは優先度順にソート済み。フィルタのみ行う。
     cache
         .tasks
         .into_iter()
@@ -84,13 +137,10 @@ fn load_asana_tasks() -> Vec<GlobalTask> {
             if t.completed {
                 return false;
             }
-            if t.assignee.contains("田澤") {
-                return true;
+            match config.task_filter_name {
+                Some(ref filter_name) => t.assignee.contains(filter_name),
+                None => true,
             }
-            if !user_name.is_empty() && t.assignee.contains(&user_name) {
-                return true;
-            }
-            false
         })
         .map(|t| GlobalTask {
             id: t.gid,
@@ -242,6 +292,7 @@ enum FocusMode {
 }
 
 struct App {
+    config: AppConfig,
     sessions: Vec<SessionItem>,
     session_state: ListState,
     global_tasks: Vec<GlobalTask>,
@@ -257,13 +308,14 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(config: AppConfig) -> Self {
         let mut session_state = ListState::default();
         session_state.select(Some(0));
         let mut task_state = ListState::default();
         task_state.select(Some(0));
 
         Self {
+            config,
             sessions: Vec::new(),
             session_state,
             global_tasks: Vec::new(),
@@ -358,30 +410,28 @@ impl App {
 // File Paths
 // ============================================================================
 
-fn get_sessions_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".config/ambient-task-agent")
+fn get_sessions_dir(data_dir: &str) -> PathBuf {
+    expand_tilde(data_dir)
 }
 
-fn get_sessions_file_path() -> PathBuf {
-    get_sessions_dir().join("sessions.json")
+fn get_sessions_file_path(data_dir: &str) -> PathBuf {
+    get_sessions_dir(data_dir).join("sessions.json")
 }
 
 // ============================================================================
 // Session Management
 // ============================================================================
 
-fn read_session_store() -> SessionsFile {
-    let path = get_sessions_file_path();
+fn read_session_store(data_dir: &str) -> SessionsFile {
+    let path = get_sessions_file_path(data_dir);
     match fs::read_to_string(&path) {
         Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
         Err(_) => SessionsFile::default(),
     }
 }
 
-fn write_session_store(store: &SessionsFile) -> Result<()> {
-    let path = get_sessions_file_path();
+fn write_session_store(store: &SessionsFile, data_dir: &str) -> Result<()> {
+    let path = get_sessions_file_path(data_dir);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -390,8 +440,8 @@ fn write_session_store(store: &SessionsFile) -> Result<()> {
     Ok(())
 }
 
-fn get_wezterm_panes() -> Vec<WezTermPane> {
-    let output = Command::new("/opt/homebrew/bin/wezterm")
+fn get_wezterm_panes(wezterm_path: &str) -> Vec<WezTermPane> {
+    let output = Command::new(wezterm_path)
         .args(["cli", "list", "--format", "json"])
         .output();
 
@@ -401,8 +451,8 @@ fn get_wezterm_panes() -> Vec<WezTermPane> {
     }
 }
 
-fn load_sessions_data(stale_threshold_mins: i64) -> Vec<SessionItem> {
-    let panes = get_wezterm_panes();
+fn load_sessions_data(config: &AppConfig) -> Vec<SessionItem> {
+    let panes = get_wezterm_panes(&config.wezterm_path);
     if panes.is_empty() {
         return Vec::new();
     }
@@ -436,9 +486,9 @@ fn load_sessions_data(stale_threshold_mins: i64) -> Vec<SessionItem> {
         }
     }
 
-    let store = read_session_store();
+    let store = read_session_store(&config.data_dir);
     let now = Utc::now();
-    let stale_threshold = chrono::Duration::minutes(stale_threshold_mins);
+    let stale_threshold = chrono::Duration::minutes(config.stale_threshold_mins);
 
     let mut sessions: Vec<SessionItem> = Vec::new();
 
@@ -513,12 +563,12 @@ fn load_sessions_data(stale_threshold_mins: i64) -> Vec<SessionItem> {
     sessions
 }
 
-fn get_pane_text(pane_id: i32) -> Vec<String> {
+fn get_pane_text(pane_id: i32, wezterm_path: &str) -> Vec<String> {
     if pane_id < 0 {
         return vec!["(disconnected)".to_string()];
     }
 
-    let output = Command::new("/opt/homebrew/bin/wezterm")
+    let output = Command::new(wezterm_path)
         .args(["cli", "get-text", "--pane-id", &pane_id.to_string()])
         .output();
 
@@ -540,7 +590,7 @@ fn update_preview(app: &mut App) {
     if let Some(idx) = app.session_state.selected() {
         if idx < visible.len() {
             let pane_id = visible[idx].pane_id;
-            app.pane_preview = get_pane_text(pane_id);
+            app.pane_preview = get_pane_text(pane_id, &app.config.wezterm_path);
             // Auto-scroll to bottom
             app.preview_scroll = app.pane_preview.len().saturating_sub(1) as u16;
         } else {
@@ -551,16 +601,16 @@ fn update_preview(app: &mut App) {
     }
 }
 
-fn activate_pane(session: &SessionItem) {
+fn activate_pane(session: &SessionItem, wezterm_path: &str) {
     if session.is_disconnected {
         return;
     }
 
-    let _ = Command::new("/opt/homebrew/bin/wezterm")
+    let _ = Command::new(wezterm_path)
         .args(["cli", "activate-tab", "--tab-id", &session.tab_id.to_string()])
         .output();
 
-    let _ = Command::new("/opt/homebrew/bin/wezterm")
+    let _ = Command::new(wezterm_path)
         .args([
             "cli",
             "activate-pane",
@@ -570,10 +620,10 @@ fn activate_pane(session: &SessionItem) {
         .output();
 }
 
-fn delete_session(session: &SessionItem) {
-    let mut store = read_session_store();
+fn delete_session(session: &SessionItem, data_dir: &str) {
+    let mut store = read_session_store(data_dir);
     store.sessions.remove(&session.session_id);
-    let _ = write_session_store(&store);
+    let _ = write_session_store(&store, data_dir);
 }
 
 // ============================================================================
@@ -698,13 +748,254 @@ fn format_reset_day(resets_at: &str) -> String {
 }
 
 // ============================================================================
-// Hook Handling (stub - session management moved to ambient-task-agent)
+// Hook Handling
 // ============================================================================
 
-fn handle_hook(_event_name: &str) -> Result<()> {
-    // セッション管理はambient-task-agentに移行済み
-    // 互換性のため空のJSONを返すだけ
+#[derive(Debug, Deserialize)]
+struct HookPayload {
+    session_id: String,
+    cwd: Option<String>,
+    notification_type: Option<String>,
+}
+
+fn handle_hook(event_name: &str, config: &AppConfig) -> Result<()> {
+    if let Some(ref cmd) = config.hook_command {
+        // External command delegation: pipe stdin through and capture stdout
+        let mut input = String::new();
+        io::stdin().read_to_string(&mut input)?;
+
+        let mut child = Command::new("sh")
+            .args(["-c", &format!("{} {}", cmd, event_name)])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()?;
+
+        if let Some(ref mut stdin) = child.stdin {
+            use std::io::Write;
+            let _ = stdin.write_all(input.as_bytes());
+        }
+
+        let output = child.wait_with_output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        print!("{}", stdout);
+        return Ok(());
+    }
+
+    // Built-in handler
+    builtin_handle_hook(event_name, &config.data_dir)?;
+    Ok(())
+}
+
+fn builtin_handle_hook(event_name: &str, data_dir: &str) -> Result<()> {
+    // 1. Read JSON from stdin
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
+
+    let payload: HookPayload = match serde_json::from_str(&input) {
+        Ok(p) => p,
+        Err(_) => {
+            println!("{{}}");
+            return Ok(());
+        }
+    };
+
+    if payload.session_id.is_empty() {
+        println!("{{}}");
+        return Ok(());
+    }
+
+    // 2. Detect TTY from ancestors
+    let tty = get_tty_from_ancestors();
+
+    // 3. Update session
+    let cwd = payload.cwd.unwrap_or_default();
+    let notification_type = payload.notification_type.as_deref();
+    update_session(
+        event_name,
+        &payload.session_id,
+        &cwd,
+        &tty,
+        notification_type,
+        data_dir,
+    )?;
+
     println!("{{}}");
+    Ok(())
+}
+
+fn get_tty_from_ancestors() -> String {
+    let mut ppid = std::os::unix::process::parent_id() as i32;
+
+    for _ in 0..5 {
+        let output = Command::new("ps")
+            .args(["-o", "tty=", "-p", &ppid.to_string()])
+            .output();
+
+        if let Ok(out) = output {
+            let tty = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !tty.is_empty() && tty != "??" {
+                return format!("/dev/{}", tty);
+            }
+        }
+
+        let output = Command::new("ps")
+            .args(["-o", "ppid=", "-p", &ppid.to_string()])
+            .output();
+
+        if let Ok(out) = output {
+            if let Ok(new_ppid) = String::from_utf8_lossy(&out.stdout).trim().parse::<i32>() {
+                ppid = new_ppid;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    String::new()
+}
+
+fn determine_status(
+    event_name: &str,
+    notification_type: Option<&str>,
+    current_status: &str,
+) -> String {
+    if event_name == "Stop" {
+        return "stopped".to_string();
+    }
+    if event_name == "UserPromptSubmit" {
+        return "running".to_string();
+    }
+    if current_status == "stopped" {
+        return "stopped".to_string();
+    }
+    if event_name == "PreToolUse" {
+        return "running".to_string();
+    }
+    if event_name == "Notification" && notification_type == Some("permission_prompt") {
+        return "waiting_input".to_string();
+    }
+    "running".to_string()
+}
+
+fn read_claude_tasks(session_id: &str) -> (Option<String>, i32, i32) {
+    let tasks_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()))
+        .join(".claude/tasks")
+        .join(session_id);
+
+    let entries = match fs::read_dir(&tasks_dir) {
+        Ok(e) => e,
+        Err(_) => return (None, 0, 0),
+    };
+
+    #[derive(Deserialize)]
+    struct TaskItem {
+        subject: String,
+        status: String,
+    }
+
+    let mut items: Vec<TaskItem> = Vec::new();
+    for entry in entries.flatten() {
+        if entry
+            .path()
+            .extension()
+            .map(|e| e == "json")
+            .unwrap_or(false)
+        {
+            if let Ok(content) = fs::read_to_string(entry.path()) {
+                if let Ok(item) = serde_json::from_str::<TaskItem>(&content) {
+                    items.push(item);
+                }
+            }
+        }
+    }
+
+    if items.is_empty() {
+        return (None, 0, 0);
+    }
+
+    let total = items.len() as i32;
+    let completed = items.iter().filter(|t| t.status == "completed").count() as i32;
+
+    let active = items
+        .iter()
+        .find(|t| t.status == "in_progress")
+        .or_else(|| items.iter().find(|t| t.status == "pending"))
+        .map(|t| t.subject.clone());
+
+    (active, completed, total)
+}
+
+fn update_session(
+    event_name: &str,
+    session_id: &str,
+    cwd: &str,
+    tty: &str,
+    notification_type: Option<&str>,
+    data_dir: &str,
+) -> Result<()> {
+    let mut store = read_session_store(data_dir);
+    let now_utc = Utc::now();
+    let now = now_utc.to_rfc3339();
+
+    // TTY deduplication: remove entries with same TTY but different session_id
+    if !tty.is_empty() {
+        store
+            .sessions
+            .retain(|k, s| s.tty != tty || k == session_id);
+    }
+
+    // Auto-cleanup: remove stopped sessions older than 24h
+    store.sessions.retain(|_, s| {
+        if s.status != "stopped" {
+            return true;
+        }
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&s.updated_at) {
+            let age = now_utc.signed_duration_since(dt.with_timezone(&Utc));
+            age < chrono::Duration::hours(24)
+        } else {
+            true
+        }
+    });
+
+    let existing = store.sessions.get(session_id);
+    let current_status = existing.map(|s| s.status.as_str()).unwrap_or("");
+    let created_at = existing
+        .map(|s| s.created_at.clone())
+        .unwrap_or_else(|| now.clone());
+    let home_cwd = cwd.to_string();
+    let final_tty = existing
+        .and_then(|s| {
+            if s.tty.is_empty() {
+                None
+            } else {
+                Some(s.tty.clone())
+            }
+        })
+        .unwrap_or_else(|| tty.to_string());
+
+    let (active_task, tasks_completed, tasks_total) = read_claude_tasks(session_id);
+    let new_status = determine_status(event_name, notification_type, current_status);
+
+    store.sessions.insert(
+        session_id.to_string(),
+        Session {
+            session_id: session_id.to_string(),
+            home_cwd,
+            tty: final_tty,
+            status: new_status,
+            created_at,
+            updated_at: now.clone(),
+            active_task,
+            tasks_completed,
+            tasks_total,
+        },
+    );
+
+    store.updated_at = now;
+    write_session_store(&store, data_dir)?;
     Ok(())
 }
 
@@ -800,11 +1091,11 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
     let active_count = app.global_tasks.iter().filter(|t| t.status != "completed").count();
     let total_count = app.global_tasks.len();
 
-    let cache_exists = get_asana_cache_path().exists();
+    let tasks_configured = app.config.tasks_file.is_some();
 
-    let items: Vec<ListItem> = if !cache_exists && app.global_tasks.is_empty() {
+    let items: Vec<ListItem> = if !tasks_configured {
         vec![ListItem::new(Span::styled(
-            "キャッシュなし (sync必要)",
+            "tasks_file 未設定",
             Style::default().fg(Color::DarkGray),
         ))]
     } else if app.global_tasks.is_empty() {
@@ -1029,7 +1320,7 @@ fn render_help_popup(frame: &mut Frame, app: &App) {
 
     let lines = if app.focus_mode == FocusMode::Tasks {
         vec![
-            Line::from(" 📋 Tasks Mode (Asana)"),
+            Line::from(" 📋 Tasks Mode"),
             Line::from(""),
             Line::from(" j/k   上下移動"),
             Line::from(" Esc   セッションに戻る"),
@@ -1087,7 +1378,7 @@ enum AppEvent {
     Tick,
     Key(event::KeyEvent),
     SessionsUpdated,
-    AsanaTasksUpdated(Vec<GlobalTask>),
+    TasksUpdated(Vec<GlobalTask>),
     UsageUpdated(UsageLimits),
 }
 
@@ -1464,7 +1755,7 @@ fn handle_dock_key(app: &mut App, key: event::KeyEvent) {
                 let visible = app.visible_sessions();
                 if let Some(idx) = app.session_state.selected() {
                     if idx < visible.len() {
-                        activate_pane(visible[idx]);
+                        activate_pane(visible[idx], &app.config.wezterm_path);
                     }
                 }
             }
@@ -1474,33 +1765,33 @@ fn handle_dock_key(app: &mut App, key: event::KeyEvent) {
                 let visible = app.visible_sessions();
                 if let Some(idx) = app.session_state.selected() {
                     if idx < visible.len() {
-                        delete_session(visible[idx]);
-                        app.sessions = load_sessions_data(30);
+                        delete_session(visible[idx], &app.config.data_dir);
+                        app.sessions = load_sessions_data(&app.config);
                     }
                 }
             }
         }
         KeyCode::Char('f') => app.show_stale = !app.show_stale,
         KeyCode::Char('r') => {
-            app.sessions = load_sessions_data(30);
-            app.global_tasks = load_asana_tasks();
+            app.sessions = load_sessions_data(&app.config);
+            app.global_tasks = load_tasks(&app.config);
             app.usage = load_usage_data();
         }
         _ => {}
     }
 }
 
-fn run_dock() -> Result<()> {
+fn run_dock(config: AppConfig) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new();
+    let mut app = App::new(config);
     app.focus_mode = FocusMode::Tasks;
-    app.sessions = load_sessions_data(30);
-    app.global_tasks = load_asana_tasks();
+    app.sessions = load_sessions_data(&app.config);
+    app.global_tasks = load_tasks(&app.config);
 
     let (tx, rx) = mpsc::channel::<AppEvent>();
 
@@ -1513,7 +1804,7 @@ fn run_dock() -> Result<()> {
 
     // File watcher for sessions
     let tx_sessions = tx.clone();
-    let sessions_path = get_sessions_file_path();
+    let sessions_path = get_sessions_file_path(&app.config.data_dir);
     let sessions_dir = sessions_path.parent().unwrap().to_path_buf();
     thread::spawn(move || {
         let (watcher_tx, watcher_rx) = mpsc::channel();
@@ -1536,30 +1827,38 @@ fn run_dock() -> Result<()> {
         }
     });
 
-    // File watcher for Asana tasks cache
-    let tx_asana = tx.clone();
-    let asana_cache_dir = get_asana_cache_dir();
-    thread::spawn(move || {
-        let (watcher_tx, watcher_rx) = mpsc::channel();
-        let mut watcher: RecommendedWatcher =
-            Watcher::new(watcher_tx, NotifyConfig::default()).unwrap();
-        let _ = fs::create_dir_all(&asana_cache_dir);
-        let _ = watcher.watch(&asana_cache_dir, RecursiveMode::NonRecursive);
+    // File watcher for tasks cache (only if tasks_file is configured)
+    if let Some(ref tasks_file) = app.config.tasks_file {
+        let tx_tasks = tx.clone();
+        let tasks_config = app.config.clone();
+        let tasks_path = expand_tilde(tasks_file);
+        let watch_dir = tasks_path.parent().unwrap_or(&tasks_path).to_path_buf();
+        let watch_filename = tasks_path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        thread::spawn(move || {
+            let (watcher_tx, watcher_rx) = mpsc::channel();
+            let mut watcher: RecommendedWatcher =
+                Watcher::new(watcher_tx, NotifyConfig::default()).unwrap();
+            let _ = fs::create_dir_all(&watch_dir);
+            let _ = watcher.watch(&watch_dir, RecursiveMode::NonRecursive);
 
-        loop {
-            if let Ok(Ok(event)) = watcher_rx.recv() {
-                if event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name().map(|n| n == "tasks-cache.json").unwrap_or(false))
-                {
-                    thread::sleep(Duration::from_millis(200));
-                    let tasks = load_asana_tasks();
-                    let _ = tx_asana.send(AppEvent::AsanaTasksUpdated(tasks));
+            loop {
+                if let Ok(Ok(event)) = watcher_rx.recv() {
+                    if event
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().map(|n| n == watch_filename).unwrap_or(false))
+                    {
+                        thread::sleep(Duration::from_millis(200));
+                        let tasks = load_tasks(&tasks_config);
+                        let _ = tx_tasks.send(AppEvent::TasksUpdated(tasks));
+                    }
                 }
             }
-        }
-    });
+        });
+    }
 
     // Usage refresh thread
     let tx_usage = tx.clone();
@@ -1599,9 +1898,9 @@ fn run_dock() -> Result<()> {
                 }
             }
             Ok(AppEvent::SessionsUpdated) => {
-                app.sessions = load_sessions_data(30);
+                app.sessions = load_sessions_data(&app.config);
             }
-            Ok(AppEvent::AsanaTasksUpdated(tasks)) => {
+            Ok(AppEvent::TasksUpdated(tasks)) => {
                 app.global_tasks = tasks;
             }
             Ok(AppEvent::UsageUpdated(usage)) => {
@@ -1626,7 +1925,7 @@ fn run_dock() -> Result<()> {
     Ok(())
 }
 
-fn run_tui() -> Result<()> {
+fn run_tui(config: AppConfig) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1634,10 +1933,10 @@ fn run_tui() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new();
+    let mut app = App::new(config);
 
-    // Load initial data (usage and kintone tasks are loaded async)
-    app.sessions = load_sessions_data(30);
+    // Load initial data
+    app.sessions = load_sessions_data(&app.config);
 
     // Setup channels for events
     let (tx, rx) = mpsc::channel::<AppEvent>();
@@ -1651,7 +1950,7 @@ fn run_tui() -> Result<()> {
 
     // File watcher for sessions
     let tx_sessions = tx.clone();
-    let sessions_path = get_sessions_file_path();
+    let sessions_path = get_sessions_file_path(&app.config.data_dir);
     let sessions_dir = sessions_path.parent().unwrap().to_path_buf();
     thread::spawn(move || {
         let (watcher_tx, watcher_rx) = mpsc::channel();
@@ -1674,33 +1973,41 @@ fn run_tui() -> Result<()> {
         }
     });
 
-    // Asana tasks: initial load from cache
-    app.global_tasks = load_asana_tasks();
+    // Tasks: initial load from cache
+    app.global_tasks = load_tasks(&app.config);
 
-    // File watcher for Asana tasks cache
-    let tx_asana = tx.clone();
-    let asana_cache_dir = get_asana_cache_dir();
-    thread::spawn(move || {
-        let (watcher_tx, watcher_rx) = mpsc::channel();
-        let mut watcher: RecommendedWatcher =
-            Watcher::new(watcher_tx, NotifyConfig::default()).unwrap();
-        let _ = fs::create_dir_all(&asana_cache_dir);
-        let _ = watcher.watch(&asana_cache_dir, RecursiveMode::NonRecursive);
+    // File watcher for tasks cache (only if tasks_file is configured)
+    if let Some(ref tasks_file) = app.config.tasks_file {
+        let tx_tasks = tx.clone();
+        let tasks_config = app.config.clone();
+        let tasks_path = expand_tilde(tasks_file);
+        let watch_dir = tasks_path.parent().unwrap_or(&tasks_path).to_path_buf();
+        let watch_filename = tasks_path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        thread::spawn(move || {
+            let (watcher_tx, watcher_rx) = mpsc::channel();
+            let mut watcher: RecommendedWatcher =
+                Watcher::new(watcher_tx, NotifyConfig::default()).unwrap();
+            let _ = fs::create_dir_all(&watch_dir);
+            let _ = watcher.watch(&watch_dir, RecursiveMode::NonRecursive);
 
-        loop {
-            if let Ok(Ok(event)) = watcher_rx.recv() {
-                if event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name().map(|n| n == "tasks-cache.json").unwrap_or(false))
-                {
-                    thread::sleep(Duration::from_millis(200));
-                    let tasks = load_asana_tasks();
-                    let _ = tx_asana.send(AppEvent::AsanaTasksUpdated(tasks));
+            loop {
+                if let Ok(Ok(event)) = watcher_rx.recv() {
+                    if event
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().map(|n| n == watch_filename).unwrap_or(false))
+                    {
+                        thread::sleep(Duration::from_millis(200));
+                        let tasks = load_tasks(&tasks_config);
+                        let _ = tx_tasks.send(AppEvent::TasksUpdated(tasks));
+                    }
                 }
             }
-        }
-    });
+        });
+    }
 
     // Usage refresh thread (also handles initial load)
     let tx_usage = tx.clone();
@@ -1749,9 +2056,9 @@ fn run_tui() -> Result<()> {
                 }
             }
             Ok(AppEvent::SessionsUpdated) => {
-                app.sessions = load_sessions_data(30);
+                app.sessions = load_sessions_data(&app.config);
             }
-            Ok(AppEvent::AsanaTasksUpdated(tasks)) => {
+            Ok(AppEvent::TasksUpdated(tasks)) => {
                 app.global_tasks = tasks;
             }
             Ok(AppEvent::UsageUpdated(usage)) => {
@@ -1802,16 +2109,16 @@ fn handle_sessions_key(app: &mut App, key: event::KeyEvent) {
             }
         }
         KeyCode::Char('r') => {
-            app.sessions = load_sessions_data(30);
-            app.global_tasks = load_asana_tasks();
+            app.sessions = load_sessions_data(&app.config);
+            app.global_tasks = load_tasks(&app.config);
             app.usage = load_usage_data();
         }
         KeyCode::Char('d') => {
             let visible = app.visible_sessions();
             if let Some(idx) = app.session_state.selected() {
                 if idx < visible.len() {
-                    delete_session(visible[idx]);
-                    app.sessions = load_sessions_data(30);
+                    delete_session(visible[idx], &app.config.data_dir);
+                    app.sessions = load_sessions_data(&app.config);
                 }
             }
         }
@@ -1831,7 +2138,7 @@ fn handle_sessions_key(app: &mut App, key: event::KeyEvent) {
             let visible = app.visible_sessions();
             if let Some(idx) = app.session_state.selected() {
                 if idx < visible.len() {
-                    activate_pane(visible[idx]);
+                    activate_pane(visible[idx], &app.config.wezterm_path);
                 }
             }
         }
@@ -1840,7 +2147,7 @@ fn handle_sessions_key(app: &mut App, key: event::KeyEvent) {
             let visible: Vec<SessionItem> = app.visible_sessions().into_iter().cloned().collect();
             if idx < visible.len() {
                 app.session_state.select(Some(idx));
-                activate_pane(&visible[idx]);
+                activate_pane(&visible[idx], &app.config.wezterm_path);
             }
         }
         _ => {}
@@ -1864,15 +2171,17 @@ fn handle_tasks_key(app: &mut App, key: event::KeyEvent) {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    let config = load_config();
+
     match cli.command {
         Some(Commands::Hook { event }) => {
-            handle_hook(&event)?;
+            handle_hook(&event, &config)?;
         }
         Some(Commands::Dock) => {
-            run_dock()?;
+            run_dock(config)?;
         }
         None => {
-            run_tui()?;
+            run_tui(config)?;
         }
     }
 
