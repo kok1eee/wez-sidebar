@@ -38,3 +38,15 @@
 
 # Task filter: only show tasks where assignee contains this name
 # task_filter_name = "Your Name"
+
+# --------------------------------------------------------------------------
+# Desktop Notifications (macOS)
+# --------------------------------------------------------------------------
+# When a Claude Code session enters "waiting_input" (permission prompt),
+# a desktop notification is sent via terminal-notifier.
+#
+# Install: brew install terminal-notifier
+#
+# - Clicking the notification body → focuses the WezTerm pane
+# - Clicking "承認" (approve) → focuses the pane + sends Enter (approves)
+# - If terminal-notifier is not installed, notifications are silently skipped.

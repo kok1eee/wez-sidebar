@@ -2,9 +2,15 @@
 
 WezTerm sidebar / dock for monitoring [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions, usage limits, and tasks.
 
-| Sidebar mode | Dock mode | WezTerm overlay |
+[日本語](README_JA.md)
+
+| Sidebar (MacBook) | Dock (external monitor) |
+|:---:|:---:|
+| ![Sidebar](docs/images/sidebar-with-panes.png) | ![Dock](docs/images/dock-mode.png) |
+
+| Mode select | Overlay | Sidebar only |
 |:---:|:---:|:---:|
-| ![Sidebar](docs/images/sidebar-mode.png) | ![Dock](docs/images/dock-mode.png) | ![Overlay](docs/images/wezterm-overlay.png) |
+| ![Select](docs/images/mode-select.png) | ![Overlay](docs/images/wezterm-overlay.png) | ![Sidebar](docs/images/sidebar-mode.png) |
 
 ## Features
 
@@ -12,7 +18,7 @@ WezTerm sidebar / dock for monitoring [Claude Code](https://docs.anthropic.com/e
 - **Usage limits** - Real-time display of Anthropic API usage (5-hour and weekly limits) with color-coded indicators
 - **Task panel** - Optional display of tasks from an external JSON cache file (e.g. Asana)
 - **Built-in hook handler** - Manages `sessions.json` autonomously; no external dependencies required
-- **Two display modes** - Vertical sidebar or horizontal dock (bottom bar with 3-column layout)
+- **Two display modes** - Sidebar (right bar for MacBook) or Dock (bottom bar for external monitors)
 - **Pane integration** - Switch to any session's WezTerm pane with Enter or number keys
 
 ## Requirements
