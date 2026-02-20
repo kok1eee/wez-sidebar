@@ -528,6 +528,13 @@ pub fn run_tui(config: AppConfig) -> Result<()> {
         let _ = tx_tick.send(AppEvent::Tick);
     });
 
+    // Delayed reload to handle race condition when panes aren't ready yet
+    let tx_delayed = tx.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(1));
+        let _ = tx_delayed.send(AppEvent::SessionsUpdated);
+    });
+
     // File watcher for sessions
     let tx_sessions = tx.clone();
     let sessions_path = get_sessions_file_path(&app.config.data_dir);

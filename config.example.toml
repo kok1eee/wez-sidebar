@@ -2,8 +2,10 @@
 # Copy to ~/.config/wez-sidebar/config.toml and customize.
 # All values are optional; defaults are used when omitted.
 
-# WezTerm binary path (auto-detected via `which wezterm` if omitted)
-# wezterm_path = "/opt/homebrew/bin/wezterm"
+# WezTerm binary path (full path recommended).
+# When wez-sidebar is launched directly by WezTerm (without a shell),
+# `which wezterm` may fail due to limited PATH. Set the full path explicitly.
+wezterm_path = "/opt/homebrew/bin/wezterm"
 
 # Session stale threshold in minutes (default: 30)
 # stale_threshold_mins = 30

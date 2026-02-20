@@ -91,7 +91,7 @@ cp config.example.toml ~/.config/wez-sidebar/config.toml
 
 | キー | デフォルト | 説明 |
 |------|-----------|------|
-| `wezterm_path` | 自動検出 | WezTerm バイナリのパス |
+| `wezterm_path` | 自動検出 | WezTerm バイナリの**フルパス**（例: `/opt/homebrew/bin/wezterm`）。WezTerm から直接起動する場合、シェルを経由しないため `which wezterm` が失敗する可能性があり、明示的な指定を推奨。 |
 | `stale_threshold_mins` | `30` | セッションを非アクティブと見なすまでの分数 |
 | `data_dir` | `~/.config/wez-sidebar` | `sessions.json` の保存ディレクトリ |
 | `hook_command` | *（内蔵）* | hook 処理を委譲する外部コマンド |

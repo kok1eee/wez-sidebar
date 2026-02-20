@@ -91,7 +91,7 @@ See [`config.example.toml`](config.example.toml) for all available options.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `wezterm_path` | auto-detect | Path to WezTerm binary |
+| `wezterm_path` | auto-detect | **Full path** to WezTerm binary (e.g. `/opt/homebrew/bin/wezterm`). Required when launched directly by WezTerm (without a shell), as `which wezterm` may fail due to limited `PATH`. |
 | `stale_threshold_mins` | `30` | Minutes before a session is considered stale |
 | `data_dir` | `~/.config/wez-sidebar` | Directory for `sessions.json` |
 | `hook_command` | *(built-in)* | External command to delegate hook handling |

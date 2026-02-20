@@ -203,10 +203,23 @@ fn render_dock_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let total = visible.len();
-    let title = if app.show_stale {
-        format!(" 🖥 Sessions [All] ({}) ", total)
+    let lines_per_session = 2usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let rows_visible = if inner_height > 0 { inner_height / lines_per_session } else { 0 };
+    let total_per_page = if rows_visible > 0 { rows_visible * 2 } else { 1 };
+    let total_pages = (total + total_per_page - 1) / total_per_page.max(1);
+    let current_page = selected / total_per_page.max(1) + 1;
+
+    let page_info = if total_pages > 1 {
+        format!(" {}/{}", current_page, total_pages)
     } else {
-        format!(" 🖥 Sessions ({}) ", total)
+        String::new()
+    };
+
+    let title = if app.show_stale {
+        format!(" 🖥 Sessions [All] ({}){} ", total, page_info)
+    } else {
+        format!(" 🖥 Sessions ({}){} ", total, page_info)
     };
 
     let block = Block::default()
@@ -231,19 +244,15 @@ fn render_dock_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(inner);
 
-    let lines_per_session = 3usize;
-
     let highlight_style = Style::default()
         .bg(Color::DarkGray)
         .add_modifier(Modifier::BOLD);
 
     // Row-based layout: [0,1] [2,3] [4,5] ...
     // Left col: indices 0,2,4,...  Right col: indices 1,3,5,...
-    let rows_visible = (inner.height as usize) / lines_per_session;
     if rows_visible == 0 {
         return;
     }
-    let total_per_page = rows_visible * 2;
     let page = selected / total_per_page;
     let scroll_offset = page * total_per_page;
 
@@ -263,7 +272,7 @@ fn render_dock_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
                 Style::default()
             };
 
-            // Line 1: marker + name
+            // Line 1: marker + name + status
             let marker = if sess.is_disconnected {
                 "⚫"
             } else if sess.is_current {
@@ -271,35 +280,47 @@ fn render_dock_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 "🔵"
             };
-            let max_name_len = (col_area.width as usize).saturating_sub(4);
-            let name = truncate_name(&sess.name, max_name_len);
-            lines.push(Line::from(Span::styled(
-                format!("{} {}", marker, name),
-                base_style,
-            )));
-
-            // Line 2: status + duration (+ progress)
             let status_icon = match sess.status.as_str() {
                 "running" => "▶",
                 "waiting_input" => "?",
                 "stopped" => "■",
                 _ => " ",
             };
+            let max_name_len = (col_area.width as usize).saturating_sub(6);
+            let name = truncate_name(&sess.name, max_name_len);
+            lines.push(Line::from(Span::styled(
+                format!("{} {} {}", marker, name, status_icon),
+                base_style,
+            )));
+
+            // Line 2: duration + task/progress info
             let duration = format_duration(&sess.created_at);
 
-            if sess.tasks_total > 0 {
+            if let Some(ref task) = sess.active_task {
                 let detail_style = if is_selected {
                     highlight_style
                 } else {
-                    Style::default().fg(Color::Cyan)
+                    Style::default().fg(Color::Yellow)
                 };
+                let max_task_len = (col_area.width as usize).saturating_sub(duration.len() + 5);
                 lines.push(Line::from(Span::styled(
-                    format!(
-                        "  {} {} {}/{}",
-                        status_icon, duration, sess.tasks_completed, sess.tasks_total
-                    ),
+                    format!("  {} ⤷{}", duration, truncate_name(task, max_task_len)),
                     detail_style,
                 )));
+            } else if sess.tasks_total > 0 {
+                let detail_style = if is_selected {
+                    highlight_style
+                } else if sess.tasks_completed == sess.tasks_total {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Cyan)
+                };
+                let progress = if sess.tasks_completed == sess.tasks_total {
+                    format!("  {} ✓ 完了", duration)
+                } else {
+                    format!("  {} {}/{}", duration, sess.tasks_completed, sess.tasks_total)
+                };
+                lines.push(Line::from(Span::styled(progress, detail_style)));
             } else {
                 let detail_style = if is_selected {
                     highlight_style
@@ -314,32 +335,9 @@ fn render_dock_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
                     ""
                 };
                 lines.push(Line::from(Span::styled(
-                    format!("  {} {}{}", status_icon, duration, suffix),
+                    format!("  {}{}", duration, suffix),
                     detail_style,
                 )));
-            }
-
-            // Line 3: active task or status
-            if let Some(ref task) = sess.active_task {
-                let task_style = if is_selected {
-                    highlight_style
-                } else {
-                    Style::default().fg(Color::Yellow)
-                };
-                let max_task_len = (col_area.width as usize).saturating_sub(5);
-                lines.push(Line::from(Span::styled(
-                    format!("  ⤷ {}", truncate_name(task, max_task_len)),
-                    task_style,
-                )));
-            } else if sess.tasks_total > 0 && sess.tasks_completed == sess.tasks_total {
-                let done_style = if is_selected {
-                    highlight_style
-                } else {
-                    Style::default().fg(Color::Green)
-                };
-                lines.push(Line::from(Span::styled("  ✓ 完了", done_style)));
-            } else {
-                lines.push(Line::from(""));
             }
         }
 
@@ -457,6 +455,13 @@ pub fn run_dock(config: AppConfig) -> Result<()> {
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(1));
         let _ = tx_tick.send(AppEvent::Tick);
+    });
+
+    // Delayed reload to handle race condition when panes aren't ready yet
+    let tx_delayed = tx.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(1));
+        let _ = tx_delayed.send(AppEvent::SessionsUpdated);
     });
 
     // File watcher for sessions

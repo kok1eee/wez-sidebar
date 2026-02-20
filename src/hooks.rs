@@ -13,11 +13,15 @@ use crate::session::{read_session_store, send_permission_notification, write_ses
 use crate::types::{HookPayload, Session};
 
 pub fn handle_hook(event_name: &str, config: &AppConfig) -> Result<()> {
-    if let Some(ref cmd) = config.hook_command {
-        // External command delegation: pipe stdin through and capture stdout
-        let mut input = String::new();
-        io::stdin().read_to_string(&mut input)?;
+    // 1. Read stdin once
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
 
+    // 2. Always run built-in handler (updates sessions.json)
+    builtin_handle_hook(event_name, config, &input)?;
+
+    // 3. Optionally delegate to external command
+    if let Some(ref cmd) = config.hook_command {
         let mut child = Command::new("sh")
             .args(["-c", &format!("{} {}", cmd, event_name)])
             .stdin(std::process::Stdio::piped())
@@ -32,36 +36,27 @@ pub fn handle_hook(event_name: &str, config: &AppConfig) -> Result<()> {
         let output = child.wait_with_output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         print!("{}", stdout);
-        return Ok(());
+    } else {
+        println!("{{}}");
     }
 
-    // Built-in handler
-    builtin_handle_hook(event_name, config)?;
     Ok(())
 }
 
-fn builtin_handle_hook(event_name: &str, config: &AppConfig) -> Result<()> {
-    // 1. Read JSON from stdin
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input)?;
-
-    let payload: HookPayload = match serde_json::from_str(&input) {
+fn builtin_handle_hook(event_name: &str, config: &AppConfig, input: &str) -> Result<()> {
+    let payload: HookPayload = match serde_json::from_str(input) {
         Ok(p) => p,
-        Err(_) => {
-            println!("{{}}");
-            return Ok(());
-        }
+        Err(_) => return Ok(()),
     };
 
     if payload.session_id.is_empty() {
-        println!("{{}}");
         return Ok(());
     }
 
-    // 2. Detect TTY from ancestors
+    // Detect TTY from ancestors
     let tty = get_tty_from_ancestors();
 
-    // 3. Update session
+    // Update session
     let cwd = payload.cwd.unwrap_or_default();
     let notification_type = payload.notification_type.as_deref();
     let new_status = update_session(
@@ -73,12 +68,11 @@ fn builtin_handle_hook(event_name: &str, config: &AppConfig) -> Result<()> {
         &config.data_dir,
     )?;
 
-    // 4. Desktop notification on permission prompt
+    // Desktop notification on permission prompt
     if new_status == "waiting_input" {
         send_permission_notification(&cwd, &tty, &config.wezterm_path);
     }
 
-    println!("{{}}");
     Ok(())
 }
 
