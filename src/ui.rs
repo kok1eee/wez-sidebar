@@ -620,7 +620,7 @@ pub fn run_tui(config: AppConfig) -> Result<()> {
             loop {
                 let connected = api_client::check_health(&api_url);
                 let _ = tx_api.send(AppEvent::ApiStatusChanged(connected));
-                thread::sleep(Duration::from_secs(5));
+                thread::sleep(Duration::from_secs(30));
             }
         });
     }
