@@ -26,7 +26,6 @@ use crate::app::{App, FocusMode};
 use crate::config::{expand_tilde, AppConfig};
 use crate::session::{
     activate_pane, delete_session, get_pane_text, get_sessions_file_path, load_sessions_data,
-    write_session_store,
 };
 use crate::tasks::load_tasks;
 use crate::types::{AppEvent, SessionItem};
@@ -611,23 +610,17 @@ pub fn run_tui(config: AppConfig) -> Result<()> {
         });
     }
 
-    // API polling thread (when api_url is configured)
+    // API health check thread (when api_url is configured)
+    // sessions.json への書き込みはビルトイン hook が行う。
+    // ここでは /health で EC2 接続状態を確認するのみ。
     if let Some(ref api_url) = app.config.api_url {
         let tx_api = tx.clone();
         let api_url = api_url.clone();
-        let data_dir = app.config.data_dir.clone();
         thread::spawn(move || {
             loop {
-                let connected = if let Some(store) = api_client::fetch_sessions(&api_url) {
-                    // Cache locally for fallback
-                    let _ = write_session_store(&store, &data_dir);
-                    true
-                } else {
-                    false
-                };
+                let connected = api_client::check_health(&api_url);
                 let _ = tx_api.send(AppEvent::ApiStatusChanged(connected));
-                let _ = tx_api.send(AppEvent::SessionsUpdated);
-                thread::sleep(Duration::from_secs(3));
+                thread::sleep(Duration::from_secs(5));
             }
         });
     }

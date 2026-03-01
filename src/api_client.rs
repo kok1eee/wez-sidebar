@@ -10,8 +10,27 @@ struct ApiSessionsResponse {
     sessions: Vec<Session>,
 }
 
+/// EC2 の /health エンドポイントに GET して接続確認のみ行う
+/// タイムアウト 2 秒。到達不能なら false を返す。
+pub fn check_health(api_url: &str) -> bool {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let url = format!("{}/health", api_url.trim_end_matches('/'));
+    match client.get(&url).send() {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    }
+}
+
 /// EC2 サーバーからセッション一覧を取得
-/// 失敗時は None を返す（呼び出し元でローカルキャッシュにフォールバック）
+/// 失敗時は None を返す（将来拡張用に残す）
+#[allow(dead_code)]
 pub fn fetch_sessions(api_url: &str) -> Option<SessionsFile> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(3))
