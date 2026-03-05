@@ -486,6 +486,11 @@ pub fn run_dock(config: AppConfig) -> Result<()> {
                 {
                     thread::sleep(Duration::from_millis(150));
                     let _ = tx_sessions.send(AppEvent::SessionsUpdated);
+                    // Hook が発火した = Claude Code がアクティブ → usage 更新
+                    let usage = load_usage_data();
+                    if usage.five_hour >= 0 {
+                        let _ = tx_sessions.send(AppEvent::UsageUpdated(usage));
+                    }
                 }
             }
         }
@@ -524,17 +529,8 @@ pub fn run_dock(config: AppConfig) -> Result<()> {
         });
     }
 
-    // Usage refresh thread
-    let tx_usage = tx.clone();
-    thread::spawn(move || {
-        let usage = load_usage_data();
-        let _ = tx_usage.send(AppEvent::UsageUpdated(usage));
-        loop {
-            thread::sleep(Duration::from_secs(60));
-            let usage = load_usage_data();
-            let _ = tx_usage.send(AppEvent::UsageUpdated(usage));
-        }
-    });
+    // Usage: initial load only (subsequent updates piggybacked on sessions watcher)
+    app.usage = load_usage_data();
 
     // Key event thread
     let tx_key = tx.clone();

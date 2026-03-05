@@ -571,10 +571,14 @@ pub fn run_tui(config: AppConfig) -> Result<()> {
                 {
                     thread::sleep(Duration::from_millis(150));
                     let _ = tx_sessions.send(AppEvent::SessionsUpdated);
-                    // Hook が発火した = Claude Code がアクティブ → health check
+                    // Hook が発火した = Claude Code がアクティブ → health check + usage
                     if let Some(ref url) = sessions_api_url {
                         let connected = api_client::check_health(url);
                         let _ = tx_sessions.send(AppEvent::ApiStatusChanged(connected));
+                    }
+                    let usage = load_usage_data();
+                    if usage.five_hour >= 0 {
+                        let _ = tx_sessions.send(AppEvent::UsageUpdated(usage));
                     }
                 }
             }
@@ -632,19 +636,8 @@ pub fn run_tui(config: AppConfig) -> Result<()> {
         });
     }
 
-    // Usage refresh thread (also handles initial load)
-    let tx_usage = tx.clone();
-    thread::spawn(move || {
-        // Initial load immediately
-        let usage = load_usage_data();
-        let _ = tx_usage.send(AppEvent::UsageUpdated(usage));
-        // Then refresh every 60s
-        loop {
-            thread::sleep(Duration::from_secs(60));
-            let usage = load_usage_data();
-            let _ = tx_usage.send(AppEvent::UsageUpdated(usage));
-        }
-    });
+    // Usage: initial load only (subsequent updates piggybacked on sessions watcher)
+    app.usage = load_usage_data();
 
     // Key event thread
     let tx_key = tx.clone();
