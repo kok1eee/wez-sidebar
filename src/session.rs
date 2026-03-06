@@ -38,6 +38,62 @@ pub fn get_wezterm_panes(wezterm_path: &str) -> Vec<WezTermPane> {
     }
 }
 
+pub fn find_wezterm_pane_by_tty(tty: &str, wezterm_path: &str) -> Option<(i32, i32)> {
+    if tty.is_empty() {
+        return None;
+    }
+    let panes = get_wezterm_panes(wezterm_path);
+    panes
+        .iter()
+        .find(|p| p.tty_name == tty)
+        .map(|p| (p.tab_id, p.pane_id))
+}
+
+pub fn send_permission_notification(cwd: &str, tty: &str, wezterm_path: &str) {
+    // terminal-notifier が存在しなければスキップ
+    let notifier = match Command::new("which")
+        .arg("terminal-notifier")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    {
+        Some(path) if !path.is_empty() => path,
+        _ => return,
+    };
+
+    let dir_name = std::path::Path::new(cwd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let (activate_cmd, approve_cmd) = match find_wezterm_pane_by_tty(tty, wezterm_path) {
+        Some((tab_id, pane_id)) => {
+            let activate = format!(
+                "{} cli activate-tab --tab-id {} && {} cli activate-pane --pane-id {}",
+                wezterm_path, tab_id, wezterm_path, pane_id
+            );
+            let approve = format!(
+                "{} && {} cli send-text --pane-id {} --no-paste $'\\n'",
+                activate, wezterm_path, pane_id
+            );
+            (activate, approve)
+        }
+        None => (
+            "open -a WezTerm".to_string(),
+            "open -a WezTerm".to_string(),
+        ),
+    };
+
+    let script = format!(
+        r#"result=$({} -title 'Claude Code' -message '許可待ち: {}' -sound Tink -actions '承認' -sender com.github.wez.wezterm); if [ "$result" = "@ACTIONCLICKED" ]; then {}; elif [ "$result" = "@CONTENTCLICKED" ]; then {}; fi"#,
+        notifier, dir_name, approve_cmd, activate_cmd
+    );
+
+    let _ = Command::new("bash").args(["-c", &script]).spawn();
+}
+
 pub fn load_sessions_data(config: &AppConfig) -> Vec<SessionItem> {
     let panes = get_wezterm_panes(&config.wezterm_path);
     if panes.is_empty() {

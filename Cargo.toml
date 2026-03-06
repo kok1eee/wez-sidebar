@@ -34,3 +34,6 @@ keyring = "3"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3.25.0"

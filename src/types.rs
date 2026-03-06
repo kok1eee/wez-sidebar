@@ -103,36 +103,40 @@ pub struct UsageLimits {
 // Tasks
 // ============================================================================
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TasksFile {
+    pub tasks: Vec<Task>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GlobalTask {
+pub struct Task {
     pub id: String,
     pub title: String,
-    pub status: String,
-    pub priority: i32,
-    pub due_on: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TasksCache {
-    pub tasks: Vec<CachedTask>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CachedTask {
-    pub gid: String,
-    pub name: String,
-    pub assignee: String,
-    pub completed: bool,
+    #[serde(default = "default_status")]
+    pub status: String, // "pending", "in_progress", "completed"
     #[serde(default = "default_priority")]
-    pub priority: i32,
+    pub priority: i32, // 1=high, 2=medium, 3=low
     #[serde(default)]
-    pub due_on: Option<String>,
+    pub due_on: Option<String>, // "2026-03-10"
+}
+
+fn default_status() -> String {
+    "pending".to_string()
 }
 
 pub fn default_priority() -> i32 {
     3
+}
+
+// ============================================================================
+// Hook
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct HookPayload {
+    pub session_id: String,
+    pub cwd: Option<String>,
+    pub notification_type: Option<String>,
 }
 
 // ============================================================================
@@ -143,7 +147,7 @@ pub enum AppEvent {
     Tick,
     Key(event::KeyEvent),
     SessionsUpdated,
-    TasksUpdated(Vec<GlobalTask>),
+    TasksUpdated(Vec<Task>),
     UsageUpdated(UsageLimits),
     ApiStatusChanged(bool),
 }

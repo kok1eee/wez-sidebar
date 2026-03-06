@@ -5,9 +5,10 @@ use std::{fs, path::PathBuf, process::Command};
 #[serde(default)]
 pub struct AppConfig {
     pub wezterm_path: String,
-    pub task_filter_name: Option<String>,
     pub stale_threshold_mins: i64,
     pub data_dir: String,
+    /// External hook command (uses built-in session handler if omitted)
+    pub hook_command: Option<String>,
     /// Tasks cache file path (no tasks shown if omitted)
     pub tasks_file: Option<String>,
     /// REST API base URL (e.g., "http://ec2-host:3000")
@@ -31,10 +32,10 @@ impl Default for AppConfig {
 
         Self {
             wezterm_path,
-            task_filter_name: None,
             stale_threshold_mins: 30,
             data_dir: "~/.config/wez-sidebar".to_string(),
-            tasks_file: None,
+            hook_command: None,
+            tasks_file: Some("~/.config/wez-sidebar/tasks.json".to_string()),
             api_url: None,
         }
     }

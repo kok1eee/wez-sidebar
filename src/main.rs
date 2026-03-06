@@ -2,6 +2,7 @@ mod api_client;
 mod app;
 mod config;
 mod dock;
+mod hooks;
 mod session;
 mod tasks;
 mod types;
@@ -13,6 +14,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config::load_config;
 use crate::dock::run_dock;
+use crate::hooks::handle_hook;
 use crate::session::{get_wezterm_panes, load_sessions_data};
 use crate::ui::run_tui;
 
@@ -26,10 +28,42 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Handle Claude Code hook event
+    Hook {
+        /// Event name (PreToolUse, PostToolUse, Notification, Stop, UserPromptSubmit)
+        event: String,
+    },
     /// Run as horizontal dock (bottom bar mode)
     Dock,
     /// Print diagnostic info for debugging
     Diag,
+    /// Manage tasks
+    Task {
+        #[command(subcommand)]
+        action: TaskAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskAction {
+    /// Add a new task
+    Add {
+        /// Task title
+        title: String,
+        /// Priority (1=high, 2=medium, 3=low)
+        #[arg(short, long, default_value_t = 2)]
+        priority: i32,
+        /// Due date (YYYY-MM-DD)
+        #[arg(short, long)]
+        due: Option<String>,
+    },
+    /// Mark a task as completed
+    Done {
+        /// Task ID
+        id: String,
+    },
+    /// List all active tasks
+    List,
 }
 
 fn main() -> Result<()> {
@@ -37,6 +71,9 @@ fn main() -> Result<()> {
     let config = load_config();
 
     match cli.command {
+        Some(Commands::Hook { event }) => {
+            handle_hook(&event, &config)?;
+        }
         Some(Commands::Dock) => {
             run_dock(config)?;
         }
@@ -58,6 +95,21 @@ fn main() -> Result<()> {
                 println!("  {} tab={} pane={} status={} dc={} stale={}", s.name, s.tab_id, s.pane_id, s.status, s.is_disconnected, s.is_stale);
             }
         }
+        Some(Commands::Task { action }) => match action {
+            TaskAction::Add {
+                title,
+                priority,
+                due,
+            } => {
+                tasks::add_task(&config, title, priority, due);
+            }
+            TaskAction::Done { id } => {
+                tasks::complete_task(&config, &id);
+            }
+            TaskAction::List => {
+                tasks::list_tasks(&config);
+            }
+        },
         None => {
             run_tui(config)?;
         }

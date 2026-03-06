@@ -1,7 +1,7 @@
 use ratatui::widgets::ListState;
 
 use crate::config::AppConfig;
-use crate::types::{GlobalTask, SessionItem, UsageLimits};
+use crate::types::{SessionItem, Task, UsageLimits};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FocusMode {
@@ -13,7 +13,7 @@ pub struct App {
     pub config: AppConfig,
     pub sessions: Vec<SessionItem>,
     pub session_state: ListState,
-    pub global_tasks: Vec<GlobalTask>,
+    pub global_tasks: Vec<Task>,
     pub task_state: ListState,
     pub usage: UsageLimits,
     pub show_stale: bool,
