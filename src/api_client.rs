@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::types::{Session, SessionsFile};
+use crate::types::{Session, SessionsFile, Task, TasksFile};
 
 #[derive(Deserialize)]
 struct ApiSessionsResponse {
@@ -26,6 +26,31 @@ pub fn check_health(api_url: &str) -> bool {
         Ok(resp) => resp.status().is_success(),
         Err(_) => false,
     }
+}
+
+/// API サーバーからタスク一覧を取得
+/// 失敗時は None を返す
+pub fn fetch_tasks(api_url: &str) -> Option<Vec<Task>> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    let url = format!("{}/api/tasks/cache", api_url.trim_end_matches('/'));
+    let resp = client.get(&url).send().ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let tasks_file: TasksFile = resp.json().ok()?;
+    Some(
+        tasks_file
+            .tasks
+            .into_iter()
+            .filter(|t| t.status != "completed")
+            .collect(),
+    )
 }
 
 /// EC2 サーバーからセッション一覧を取得

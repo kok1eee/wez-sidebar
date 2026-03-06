@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use crate::api_client;
 use crate::config::{expand_tilde, AppConfig};
 use crate::types::{Task, TasksFile};
 
@@ -9,8 +10,21 @@ pub fn get_tasks_file_path(config: &AppConfig) -> Option<PathBuf> {
     config.tasks_file.as_ref().map(|p| expand_tilde(p))
 }
 
-/// Load tasks from the tasks file, filtering out completed ones
+/// Load tasks: API優先、フォールバックでファイル読み込み
 pub fn load_tasks(config: &AppConfig) -> Vec<Task> {
+    // api_url が設定されていれば API から取得を試みる
+    if let Some(ref api_url) = config.api_url {
+        if let Some(tasks) = api_client::fetch_tasks(api_url) {
+            return tasks;
+        }
+    }
+
+    // フォールバック: ファイルから読み込み
+    load_tasks_from_file(config)
+}
+
+/// Load tasks from the tasks file, filtering out completed ones
+fn load_tasks_from_file(config: &AppConfig) -> Vec<Task> {
     let path = match get_tasks_file_path(config) {
         Some(p) => p,
         None => return Vec::new(),
