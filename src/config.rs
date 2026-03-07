@@ -35,7 +35,7 @@ impl Default for AppConfig {
             stale_threshold_mins: 30,
             data_dir: "~/.config/wez-sidebar".to_string(),
             hook_command: None,
-            tasks_file: Some("~/.config/wez-sidebar/tasks.json".to_string()),
+            tasks_file: None,
             api_url: None,
         }
     }

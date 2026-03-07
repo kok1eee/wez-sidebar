@@ -123,7 +123,7 @@ fn render_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
     let active_count = app.global_tasks.iter().filter(|t| t.status != "completed").count();
     let total_count = app.global_tasks.len();
 
-    let tasks_configured = app.config.tasks_file.is_some();
+    let tasks_configured = app.config.tasks_file.is_some() || app.config.api_url.is_some();
 
     let items: Vec<ListItem> = if !tasks_configured {
         vec![ListItem::new(Span::styled(

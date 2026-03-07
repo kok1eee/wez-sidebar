@@ -5,9 +5,16 @@ use crate::api_client;
 use crate::config::{expand_tilde, AppConfig};
 use crate::types::{Task, TasksFile};
 
+const DEFAULT_TASKS_FILE: &str = "~/.config/wez-sidebar/tasks.json";
+
 /// Get the tasks file path from config (with tilde expansion)
 pub fn get_tasks_file_path(config: &AppConfig) -> Option<PathBuf> {
     config.tasks_file.as_ref().map(|p| expand_tilde(p))
+}
+
+/// Get the tasks file path for CLI commands (uses default if not configured)
+fn get_tasks_file_path_or_default(config: &AppConfig) -> PathBuf {
+    get_tasks_file_path(config).unwrap_or_else(|| expand_tilde(DEFAULT_TASKS_FILE))
 }
 
 /// Load tasks: API優先、フォールバックでファイル読み込み
@@ -21,6 +28,22 @@ pub fn load_tasks(config: &AppConfig) -> Vec<Task> {
 
     // フォールバック: ファイルから読み込み
     load_tasks_from_file(config)
+}
+
+/// Load tasks for CLI: API優先、フォールバックでデフォルトパスも含めてファイル読み込み
+fn load_tasks_for_cli(config: &AppConfig) -> Vec<Task> {
+    if let Some(ref api_url) = config.api_url {
+        if let Some(tasks) = api_client::fetch_tasks(api_url) {
+            return tasks;
+        }
+    }
+
+    let path = get_tasks_file_path_or_default(config);
+    read_tasks_file(&path)
+        .tasks
+        .into_iter()
+        .filter(|t| t.status != "completed")
+        .collect()
 }
 
 /// Load tasks from the tasks file, filtering out completed ones
@@ -48,13 +71,7 @@ fn load_tasks_from_file(config: &AppConfig) -> Vec<Task> {
 
 /// Add a new task to the tasks file
 pub fn add_task(config: &AppConfig, title: String, priority: i32, due_on: Option<String>) {
-    let path = match get_tasks_file_path(config) {
-        Some(p) => p,
-        None => {
-            eprintln!("tasks_file is not configured");
-            return;
-        }
-    };
+    let path = get_tasks_file_path_or_default(config);
 
     let mut tasks_file = read_tasks_file(&path);
 
@@ -74,13 +91,7 @@ pub fn add_task(config: &AppConfig, title: String, priority: i32, due_on: Option
 
 /// Mark a task as completed
 pub fn complete_task(config: &AppConfig, id: &str) {
-    let path = match get_tasks_file_path(config) {
-        Some(p) => p,
-        None => {
-            eprintln!("tasks_file is not configured");
-            return;
-        }
-    };
+    let path = get_tasks_file_path_or_default(config);
 
     let mut tasks_file = read_tasks_file(&path);
 
@@ -103,7 +114,7 @@ pub fn complete_task(config: &AppConfig, id: &str) {
 
 /// List all non-completed tasks (CLI output)
 pub fn list_tasks(config: &AppConfig) {
-    let tasks = load_tasks(config);
+    let tasks = load_tasks_for_cli(config);
     if tasks.is_empty() {
         println!("No active tasks.");
         return;

@@ -19,7 +19,7 @@ wezterm_path = "/opt/homebrew/bin/wezterm"
 # By default, wez-sidebar uses its built-in hook handler to manage
 # sessions.json. Set hook_command to delegate to an external program instead.
 #
-# hook_command = "ambient-task-agent hook"
+# hook_command = "my-custom-tool hook"
 #
 # Hook setup in ~/.claude/settings.json:
 #   "hooks": {
@@ -33,13 +33,28 @@ wezterm_path = "/opt/homebrew/bin/wezterm"
 # --------------------------------------------------------------------------
 # Tasks
 # --------------------------------------------------------------------------
-# Path to a tasks cache JSON file. If omitted, the Tasks panel shows
-# "tasks_file 未設定" and no file watcher is started.
+# Path to a tasks JSON file. If omitted, the Tasks panel is hidden.
+# Manage tasks via CLI: wez-sidebar task add/done/list
+# The CLI uses ~/.config/wez-sidebar/tasks.json by default even without this setting.
 #
-# tasks_file = "~/.config/wez-sidebar/tasks-cache.json"
+# tasks_file = "~/.config/wez-sidebar/tasks.json"
+#
+# Task file format:
+# {
+#   "tasks": [
+#     { "id": "1", "title": "Task name", "status": "pending", "priority": 1, "due_on": "2026-03-10" }
+#   ]
+# }
+# status: "pending" | "in_progress" | "completed"
+# priority: 1 (high) | 2 (medium) | 3 (low)
 
-# Task filter: only show tasks where assignee contains this name
-# task_filter_name = "Your Name"
+# --------------------------------------------------------------------------
+# REST API (optional)
+# --------------------------------------------------------------------------
+# If set, tasks are fetched from GET {api_url}/api/tasks/cache
+# with tasks_file as fallback.
+#
+# api_url = "http://localhost:3000"
 
 # --------------------------------------------------------------------------
 # Desktop Notifications (macOS)

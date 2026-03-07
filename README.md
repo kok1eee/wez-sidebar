@@ -15,11 +15,13 @@ WezTerm sidebar / dock for monitoring [Claude Code](https://docs.anthropic.com/e
 ## Features
 
 - **Session monitoring** - Track active Claude Code sessions with status (running / waiting input / stopped), uptime, and task progress
-- **Usage limits** - Real-time display of Anthropic API usage (5-hour and weekly limits) with color-coded indicators
-- **Task panel** - Optional display of tasks from an external JSON cache file (e.g. Asana)
+- **Yolo mode detection** - Automatically detects `--dangerously-skip-permissions` sessions via process tree inspection
+- **Usage limits** - Anthropic API usage (5-hour and weekly limits) with color-coded indicators, updated via hook with 10-min cooldown
+- **Task management** - Built-in CLI (`wez-sidebar task add/done/list`) and optional JSON file for external integrations
 - **Built-in hook handler** - Manages `sessions.json` autonomously; no external dependencies required
 - **Two display modes** - Sidebar (right bar for MacBook) or Dock (bottom bar for external monitors)
 - **Pane integration** - Switch to any session's WezTerm pane with Enter or number keys
+- **Desktop notifications** - macOS notification on permission prompts (via `terminal-notifier`)
 
 ## Requirements
 
@@ -27,15 +29,17 @@ WezTerm sidebar / dock for monitoring [Claude Code](https://docs.anthropic.com/e
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 - Rust toolchain (for building)
 
-## Installation
+## Quick Start
+
+### 1. Install
 
 ```bash
+git clone https://github.com/kok1eee/wez-sidebar.git
+cd wez-sidebar
 cargo install --path .
 ```
 
-## Setup
-
-### 1. Register hooks
+### 2. Register hooks
 
 Add the following to `~/.claude/settings.json`:
 
@@ -61,7 +65,7 @@ Add the following to `~/.claude/settings.json`:
 }
 ```
 
-### 2. Configure WezTerm
+### 3. Configure WezTerm
 
 Add a sidebar or dock pane that runs `wez-sidebar` (or `wez-sidebar dock`).
 
@@ -73,46 +77,102 @@ Example WezTerm keybinding to toggle a right sidebar:
   mods = "LEADER",
   action = wezterm.action_callback(function(window, pane)
     local tab = window:active_tab()
-    -- Toggle logic: split right with wez-sidebar
     tab:active_pane():split({ direction = "Right", args = { "wez-sidebar" } })
   end),
 }
 ```
 
-### 3. (Optional) Create config file
+That's it. No config file needed — it works out of the box.
+
+## Session Markers
+
+| Marker | Meaning |
+|--------|---------|
+| 🟢 | Current pane |
+| 🔵 | Other pane |
+| 🤖 | Yolo mode (`--dangerously-skip-permissions`) |
+| ⚫ | Disconnected |
+
+| Status | Meaning |
+|--------|---------|
+| ▶ | Running |
+| ? | Waiting for input (permission prompt) |
+| ■ | Stopped |
+
+## Task Management (Optional)
+
+wez-sidebar includes a built-in task CLI. Tasks are stored in `~/.config/wez-sidebar/tasks.json`.
 
 ```bash
-cp config.example.toml ~/.config/wez-sidebar/config.toml
+# Add a task
+wez-sidebar task add "Implement auth" -p 1 -d 2026-03-10
+
+# List tasks
+wez-sidebar task list
+
+# Complete a task
+wez-sidebar task done <id>
 ```
 
-See [`config.example.toml`](config.example.toml) for all available options.
+To show tasks in the TUI panel, set `tasks_file` in your config:
+
+```toml
+# ~/.config/wez-sidebar/config.toml
+tasks_file = "~/.config/wez-sidebar/tasks.json"
+```
+
+The TUI watches the file for changes and updates in real-time.
+
+You can also write the same JSON format from external tools (Asana sync scripts, GitHub Actions, etc.):
+
+```json
+{
+  "tasks": [
+    { "id": "1", "title": "Task name", "status": "pending", "priority": 1, "due_on": "2026-03-10" }
+  ]
+}
+```
 
 ## Configuration
 
+All settings are optional. Create `~/.config/wez-sidebar/config.toml` only if you need to customize.
+
 | Key | Default | Description |
 |-----|---------|-------------|
-| `wezterm_path` | auto-detect | **Full path** to WezTerm binary (e.g. `/opt/homebrew/bin/wezterm`). Required when launched directly by WezTerm (without a shell), as `which wezterm` may fail due to limited `PATH`. |
+| `wezterm_path` | auto-detect | Full path to WezTerm binary |
 | `stale_threshold_mins` | `30` | Minutes before a session is considered stale |
-| `data_dir` | `~/.config/wez-sidebar` | Directory for `sessions.json` |
+| `data_dir` | `~/.config/wez-sidebar` | Directory for `sessions.json` and `usage-cache.json` |
+| `tasks_file` | *(none)* | Path to tasks JSON file (enables TUI task panel) |
 | `hook_command` | *(built-in)* | External command to delegate hook handling |
-| `tasks_file` | *(none)* | Path to tasks cache JSON file |
-| `task_filter_name` | *(none)* | Only show tasks where assignee contains this name |
+| `api_url` | *(none)* | REST API base URL for remote task fetching |
 
-## Usage
+See [`config.example.toml`](config.example.toml) for details.
 
-### Sidebar mode (default)
+### Hook Delegation
+
+By default, `wez-sidebar hook` handles everything internally. To delegate to an external tool (while keeping built-in session management):
+
+```toml
+hook_command = "my-custom-tool hook"
+```
+
+The external command receives the hook payload on stdin after wez-sidebar updates `sessions.json`.
+
+## Display Modes
+
+### Sidebar (default)
 
 ```bash
 wez-sidebar
 ```
 
-### Dock mode (horizontal bottom bar)
+### Dock (horizontal bottom bar)
 
 ```bash
 wez-sidebar dock
 ```
 
-### Keybindings
+## Keybindings
 
 | Key | Sidebar | Dock |
 |-----|---------|------|
@@ -126,6 +186,19 @@ wez-sidebar dock
 | `r` | Refresh all | Refresh all |
 | `?` | Help | Help |
 | `q`/`Esc` | Quit | Quit |
+
+## Architecture
+
+```
+Claude Code ──hook──→ wez-sidebar hook <event>
+                              │
+                        sessions.json (session state)
+                        usage-cache.json (API usage, 10-min cooldown)
+                              │
+                        file watcher
+                              │
+                        wez-sidebar TUI
+```
 
 ## License
 
