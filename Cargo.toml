@@ -3,7 +3,12 @@ name = "wez-sidebar"
 version = "0.1.0"
 edition = "2021"
 description = "WezTerm sidebar with Claude Code session monitoring and task management"
-authors = ["tazawa-masayoshi"]
+authors = ["kok1eee"]
+license = "MIT"
+repository = "https://github.com/kok1eee/wez-sidebar"
+homepage = "https://github.com/kok1eee/wez-sidebar"
+keywords = ["wezterm", "claude-code", "tui", "sidebar"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 # TUI

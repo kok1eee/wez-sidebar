@@ -29,9 +29,31 @@
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 - Rust ツールチェーン（ビルド用）
 
-## クイックスタート
+## インストール
 
-### 1. インストール
+### バイナリ（Rust 不要）
+
+```bash
+# macOS (Apple Silicon)
+curl -L https://github.com/kok1eee/wez-sidebar/releases/latest/download/wez-sidebar-aarch64-apple-darwin \
+  -o ~/.local/bin/wez-sidebar && chmod +x ~/.local/bin/wez-sidebar
+
+# macOS (Intel)
+curl -L https://github.com/kok1eee/wez-sidebar/releases/latest/download/wez-sidebar-x86_64-apple-darwin \
+  -o ~/.local/bin/wez-sidebar && chmod +x ~/.local/bin/wez-sidebar
+
+# Linux (x86_64)
+curl -L https://github.com/kok1eee/wez-sidebar/releases/latest/download/wez-sidebar-x86_64-linux \
+  -o ~/.local/bin/wez-sidebar && chmod +x ~/.local/bin/wez-sidebar
+```
+
+### Cargo
+
+```bash
+cargo install wez-sidebar
+```
+
+### ソースから
 
 ```bash
 git clone https://github.com/kok1eee/wez-sidebar.git
@@ -39,7 +61,25 @@ cd wez-sidebar
 cargo install --path .
 ```
 
-### 2. Hook の登録
+## クイックスタート
+
+セットアップウィザードを実行:
+
+```bash
+wez-sidebar init
+```
+
+以下を対話的にセットアップ:
+1. Claude Code hooks を `~/.claude/settings.json` に登録
+2. タスク管理のセットアップ（オプション）
+3. WezTerm キーバインドの案内
+
+### 手動セットアップ
+
+<details>
+<summary>手動で設定する場合</summary>
+
+#### 1. Hook の登録
 
 `~/.claude/settings.json` に以下を追加:
 
@@ -65,11 +105,9 @@ cargo install --path .
 }
 ```
 
-### 3. WezTerm の設定
+#### 2. WezTerm の設定
 
-`wez-sidebar`（または `wez-sidebar dock`）を実行するサイドバー/ドックペインを追加。
-
-右サイドバーとして起動するキーバインド例:
+サイドバーを開くキーバインドを追加:
 
 ```lua
 {
@@ -81,6 +119,8 @@ cargo install --path .
   end),
 }
 ```
+
+</details>
 
 これだけで動く。設定ファイルは不要。
 

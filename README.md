@@ -29,9 +29,31 @@ WezTerm sidebar / dock for monitoring [Claude Code](https://docs.anthropic.com/e
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 - Rust toolchain (for building)
 
-## Quick Start
+## Install
 
-### 1. Install
+### Binary (no Rust required)
+
+```bash
+# macOS (Apple Silicon)
+curl -L https://github.com/kok1eee/wez-sidebar/releases/latest/download/wez-sidebar-aarch64-apple-darwin \
+  -o ~/.local/bin/wez-sidebar && chmod +x ~/.local/bin/wez-sidebar
+
+# macOS (Intel)
+curl -L https://github.com/kok1eee/wez-sidebar/releases/latest/download/wez-sidebar-x86_64-apple-darwin \
+  -o ~/.local/bin/wez-sidebar && chmod +x ~/.local/bin/wez-sidebar
+
+# Linux (x86_64)
+curl -L https://github.com/kok1eee/wez-sidebar/releases/latest/download/wez-sidebar-x86_64-linux \
+  -o ~/.local/bin/wez-sidebar && chmod +x ~/.local/bin/wez-sidebar
+```
+
+### Cargo
+
+```bash
+cargo install wez-sidebar
+```
+
+### From source
 
 ```bash
 git clone https://github.com/kok1eee/wez-sidebar.git
@@ -39,7 +61,25 @@ cd wez-sidebar
 cargo install --path .
 ```
 
-### 2. Register hooks
+## Quick Start
+
+Run the setup wizard:
+
+```bash
+wez-sidebar init
+```
+
+This will:
+1. Register Claude Code hooks in `~/.claude/settings.json`
+2. Guide you through task management setup (optional)
+3. Show WezTerm keybinding examples
+
+### Manual setup
+
+<details>
+<summary>If you prefer manual configuration</summary>
+
+#### 1. Register hooks
 
 Add the following to `~/.claude/settings.json`:
 
@@ -65,11 +105,9 @@ Add the following to `~/.claude/settings.json`:
 }
 ```
 
-### 3. Configure WezTerm
+#### 2. Configure WezTerm
 
-Add a sidebar or dock pane that runs `wez-sidebar` (or `wez-sidebar dock`).
-
-Example WezTerm keybinding to toggle a right sidebar:
+Add a keybinding to open the sidebar:
 
 ```lua
 {
@@ -81,6 +119,8 @@ Example WezTerm keybinding to toggle a right sidebar:
   end),
 }
 ```
+
+</details>
 
 That's it. No config file needed — it works out of the box.
 

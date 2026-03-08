@@ -17,56 +17,40 @@ fn get_tasks_file_path_or_default(config: &AppConfig) -> PathBuf {
     get_tasks_file_path(config).unwrap_or_else(|| expand_tilde(DEFAULT_TASKS_FILE))
 }
 
-/// Load tasks: API優先、フォールバックでファイル読み込み
-pub fn load_tasks(config: &AppConfig) -> Vec<Task> {
-    // api_url が設定されていれば API から取得を試みる
-    if let Some(ref api_url) = config.api_url {
-        if let Some(tasks) = api_client::fetch_tasks(api_url) {
-            return tasks;
-        }
-    }
-
-    // フォールバック: ファイルから読み込み
-    load_tasks_from_file(config)
+/// Try fetching tasks from API if configured
+fn fetch_tasks_from_api(config: &AppConfig) -> Option<Vec<Task>> {
+    let api_url = config.api_url.as_ref()?;
+    api_client::fetch_tasks(api_url)
 }
 
-/// Load tasks for CLI: API優先、フォールバックでデフォルトパスも含めてファイル読み込み
-fn load_tasks_for_cli(config: &AppConfig) -> Vec<Task> {
-    if let Some(ref api_url) = config.api_url {
-        if let Some(tasks) = api_client::fetch_tasks(api_url) {
-            return tasks;
-        }
-    }
-
-    let path = get_tasks_file_path_or_default(config);
-    read_tasks_file(&path)
-        .tasks
-        .into_iter()
-        .filter(|t| t.status != "completed")
-        .collect()
-}
-
-/// Load tasks from the tasks file, filtering out completed ones
-fn load_tasks_from_file(config: &AppConfig) -> Vec<Task> {
-    let path = match get_tasks_file_path(config) {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
-    let content = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let tasks_file: TasksFile = match serde_json::from_str(&content) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
+/// Filter out completed tasks
+fn active_tasks(tasks_file: TasksFile) -> Vec<Task> {
     tasks_file
         .tasks
         .into_iter()
         .filter(|t| t.status != "completed")
         .collect()
+}
+
+/// Load tasks: API優先、フォールバックでファイル読み込み
+pub fn load_tasks(config: &AppConfig) -> Vec<Task> {
+    if let Some(tasks) = fetch_tasks_from_api(config) {
+        return tasks;
+    }
+    let path = match get_tasks_file_path(config) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    active_tasks(read_tasks_file(&path))
+}
+
+/// Load tasks for CLI: API優先、フォールバックでデフォルトパスも含めてファイル読み込み
+fn load_tasks_for_cli(config: &AppConfig) -> Vec<Task> {
+    if let Some(tasks) = fetch_tasks_from_api(config) {
+        return tasks;
+    }
+    let path = get_tasks_file_path_or_default(config);
+    active_tasks(read_tasks_file(&path))
 }
 
 /// Add a new task to the tasks file

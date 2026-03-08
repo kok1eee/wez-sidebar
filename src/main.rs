@@ -3,6 +3,7 @@ mod app;
 mod config;
 mod dock;
 mod hooks;
+mod init;
 mod session;
 mod tasks;
 mod types;
@@ -35,6 +36,8 @@ enum Commands {
     },
     /// Run as horizontal dock (bottom bar mode)
     Dock,
+    /// Interactive setup wizard
+    Init,
     /// Print diagnostic info for debugging
     Diag,
     /// Manage tasks
@@ -76,6 +79,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Dock) => {
             run_dock(config)?;
+        }
+        Some(Commands::Init) => {
+            init::run_init();
         }
         Some(Commands::Diag) => {
             let pane_env = std::env::var("WEZTERM_PANE").unwrap_or_else(|_| "(not set)".into());

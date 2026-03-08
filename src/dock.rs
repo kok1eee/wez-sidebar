@@ -121,8 +121,7 @@ fn render_dock_usage(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_dock_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
-    let active_count = app.global_tasks.iter().filter(|t| t.status != "completed").count();
-    let total_count = app.global_tasks.len();
+    let task_count = app.global_tasks.len();
     let max_title_len = (area.width as usize).saturating_sub(6); // icon + padding
 
     let items: Vec<ListItem> = if app.global_tasks.is_empty() {
@@ -175,7 +174,7 @@ fn render_dock_tasks(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
-        .title(format!(" 📋 Tasks ({}/{}) ", active_count, total_count));
+        .title(format!(" 📋 Tasks ({}) ", task_count));
 
     let highlight_style = if app.focus_mode == FocusMode::Tasks {
         Style::default()
