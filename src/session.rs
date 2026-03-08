@@ -135,7 +135,7 @@ pub fn load_sessions_data(config: &AppConfig) -> Vec<SessionItem> {
 
     let mut sessions: Vec<SessionItem> = Vec::new();
 
-    for (_, sess) in &store.sessions {
+    for sess in store.sessions.values() {
         let pane = tty_to_pane.get(&sess.tty);
         let name = std::path::Path::new(&sess.home_cwd)
             .file_name()
@@ -154,6 +154,9 @@ pub fn load_sessions_data(config: &AppConfig) -> Vec<SessionItem> {
             if pane.window_id != current_window_id {
                 continue;
             }
+            let last_user_message_at = sess.last_user_message_at.as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
             sessions.push(SessionItem {
                 tab_id: pane.tab_id,
                 pane_id: pane.pane_id,
@@ -165,15 +168,22 @@ pub fn load_sessions_data(config: &AppConfig) -> Vec<SessionItem> {
                 is_stale,
                 session_id: sess.session_id.clone(),
                 is_disconnected: false,
-                active_task: sess.active_task.clone(),
-                tasks_completed: sess.tasks_completed,
-                tasks_total: sess.tasks_total,
                 is_yolo: sess.is_yolo,
+                last_activity: sess.last_activity.clone(),
+                is_dangerous: sess.is_dangerous,
+                git_branch: sess.git_branch.clone(),
+                home_cwd: sess.home_cwd.clone(),
+                last_user_message: sess.last_user_message.clone(),
+                last_user_message_at,
+                tasks: sess.tasks.clone(),
             });
         } else {
             // Disconnected session
             let age = now.signed_duration_since(updated_at);
             if age <= chrono::Duration::hours(24) {
+                let last_user_message_at = sess.last_user_message_at.as_deref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
                 sessions.push(SessionItem {
                     tab_id: -1,
                     pane_id: -1,
@@ -185,10 +195,14 @@ pub fn load_sessions_data(config: &AppConfig) -> Vec<SessionItem> {
                     is_stale,
                     session_id: sess.session_id.clone(),
                     is_disconnected: true,
-                    active_task: sess.active_task.clone(),
-                    tasks_completed: sess.tasks_completed,
-                    tasks_total: sess.tasks_total,
                     is_yolo: sess.is_yolo,
+                    last_activity: sess.last_activity.clone(),
+                    is_dangerous: sess.is_dangerous,
+                    git_branch: sess.git_branch.clone(),
+                    home_cwd: sess.home_cwd.clone(),
+                    last_user_message: sess.last_user_message.clone(),
+                    last_user_message_at,
+                    tasks: sess.tasks.clone(),
                 });
             }
         }

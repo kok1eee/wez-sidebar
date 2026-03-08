@@ -22,13 +22,25 @@ pub struct Session {
     pub created_at: String,
     pub updated_at: String,
     #[serde(default)]
-    pub active_task: Option<String>,
-    #[serde(default)]
-    pub tasks_completed: i32,
-    #[serde(default)]
-    pub tasks_total: i32,
-    #[serde(default)]
     pub is_yolo: bool,
+    #[serde(default)]
+    pub last_activity: Option<String>,
+    #[serde(default)]
+    pub is_dangerous: bool,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    #[serde(default)]
+    pub last_user_message: Option<String>,
+    #[serde(default)]
+    pub last_user_message_at: Option<String>,
+    #[serde(default)]
+    pub tasks: Vec<SessionTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTask {
+    pub content: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone)]
@@ -43,10 +55,14 @@ pub struct SessionItem {
     pub is_stale: bool,
     pub session_id: String,
     pub is_disconnected: bool,
-    pub active_task: Option<String>,
-    pub tasks_completed: i32,
-    pub tasks_total: i32,
     pub is_yolo: bool,
+    pub last_activity: Option<String>,
+    pub is_dangerous: bool,
+    pub git_branch: Option<String>,
+    pub home_cwd: String,
+    pub last_user_message: Option<String>,
+    pub last_user_message_at: Option<DateTime<Utc>>,
+    pub tasks: Vec<SessionTask>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -100,35 +116,6 @@ pub struct UsageLimits {
 }
 
 // ============================================================================
-// Tasks
-// ============================================================================
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TasksFile {
-    pub tasks: Vec<Task>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Task {
-    pub id: String,
-    pub title: String,
-    #[serde(default = "default_status")]
-    pub status: String, // "pending", "in_progress", "completed"
-    #[serde(default = "default_priority")]
-    pub priority: i32, // 1=high, 2=medium, 3=low
-    #[serde(default)]
-    pub due_on: Option<String>, // "2026-03-10"
-}
-
-fn default_status() -> String {
-    "pending".to_string()
-}
-
-pub fn default_priority() -> i32 {
-    3
-}
-
-// ============================================================================
 // Hook
 // ============================================================================
 
@@ -137,6 +124,9 @@ pub struct HookPayload {
     pub session_id: String,
     pub cwd: Option<String>,
     pub notification_type: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_input: Option<serde_json::Value>,
+    pub prompt: Option<String>,
 }
 
 // ============================================================================
@@ -147,7 +137,5 @@ pub enum AppEvent {
     Tick,
     Key(event::KeyEvent),
     SessionsUpdated,
-    TasksUpdated(Vec<Task>),
     UsageUpdated(UsageLimits),
-    ApiStatusChanged(bool),
 }

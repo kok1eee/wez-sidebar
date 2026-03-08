@@ -10,51 +10,8 @@ wezterm_path = "/opt/homebrew/bin/wezterm"
 # Session stale threshold in minutes (default: 30)
 # stale_threshold_mins = 30
 
-# Data directory for sessions.json (default: ~/.config/wez-sidebar)
+# Data directory for sessions.json and usage-cache.json (default: ~/.config/wez-sidebar)
 # data_dir = "~/.config/wez-sidebar"
-
-# --------------------------------------------------------------------------
-# Hook command
-# --------------------------------------------------------------------------
-# By default, wez-sidebar uses its built-in hook handler to manage
-# sessions.json. Set hook_command to delegate to an external program instead.
-#
-# hook_command = "my-custom-tool hook"
-#
-# Hook setup in ~/.claude/settings.json:
-#   "hooks": {
-#     "PreToolUse":        [{ "command": "~/.cargo/bin/wez-sidebar hook PreToolUse" }],
-#     "PostToolUse":       [{ "command": "~/.cargo/bin/wez-sidebar hook PostToolUse" }],
-#     "Notification":      [{ "command": "~/.cargo/bin/wez-sidebar hook Notification" }],
-#     "Stop":              [{ "command": "~/.cargo/bin/wez-sidebar hook Stop" }],
-#     "UserPromptSubmit":  [{ "command": "~/.cargo/bin/wez-sidebar hook UserPromptSubmit" }]
-#   }
-
-# --------------------------------------------------------------------------
-# Tasks
-# --------------------------------------------------------------------------
-# Path to a tasks JSON file. If omitted, the Tasks panel is hidden.
-# Manage tasks via CLI: wez-sidebar task add/done/list
-# The CLI uses ~/.config/wez-sidebar/tasks.json by default even without this setting.
-#
-# tasks_file = "~/.config/wez-sidebar/tasks.json"
-#
-# Task file format:
-# {
-#   "tasks": [
-#     { "id": "1", "title": "Task name", "status": "pending", "priority": 1, "due_on": "2026-03-10" }
-#   ]
-# }
-# status: "pending" | "in_progress" | "completed"
-# priority: 1 (high) | 2 (medium) | 3 (low)
-
-# --------------------------------------------------------------------------
-# REST API (optional)
-# --------------------------------------------------------------------------
-# If set, tasks are fetched from GET {api_url}/api/tasks/cache
-# with tasks_file as fallback.
-#
-# api_url = "http://localhost:3000"
 
 # --------------------------------------------------------------------------
 # Desktop Notifications (macOS)
@@ -64,6 +21,5 @@ wezterm_path = "/opt/homebrew/bin/wezterm"
 #
 # Install: brew install terminal-notifier
 #
-# - Clicking the notification body → focuses the WezTerm pane
-# - Clicking "承認" (approve) → focuses the pane + sends Enter (approves)
+# - Clicking the notification body -> focuses the WezTerm pane
 # - If terminal-notifier is not installed, notifications are silently skipped.

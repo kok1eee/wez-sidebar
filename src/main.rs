@@ -1,11 +1,9 @@
-mod api_client;
 mod app;
 mod config;
 mod dock;
 mod hooks;
 mod init;
 mod session;
-mod tasks;
 mod types;
 mod ui;
 mod usage;
@@ -21,7 +19,7 @@ use crate::ui::run_tui;
 
 #[derive(Parser)]
 #[command(name = "wez-sidebar")]
-#[command(about = "WezTerm sidebar with Claude Code monitoring and task management")]
+#[command(about = "WezTerm sidebar for Claude Code session monitoring")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -40,33 +38,6 @@ enum Commands {
     Init,
     /// Print diagnostic info for debugging
     Diag,
-    /// Manage tasks
-    Task {
-        #[command(subcommand)]
-        action: TaskAction,
-    },
-}
-
-#[derive(Subcommand)]
-enum TaskAction {
-    /// Add a new task
-    Add {
-        /// Task title
-        title: String,
-        /// Priority (1=high, 2=medium, 3=low)
-        #[arg(short, long, default_value_t = 2)]
-        priority: i32,
-        /// Due date (YYYY-MM-DD)
-        #[arg(short, long)]
-        due: Option<String>,
-    },
-    /// Mark a task as completed
-    Done {
-        /// Task ID
-        id: String,
-    },
-    /// List all active tasks
-    List,
 }
 
 fn main() -> Result<()> {
@@ -101,21 +72,6 @@ fn main() -> Result<()> {
                 println!("  {} tab={} pane={} status={} dc={} stale={}", s.name, s.tab_id, s.pane_id, s.status, s.is_disconnected, s.is_stale);
             }
         }
-        Some(Commands::Task { action }) => match action {
-            TaskAction::Add {
-                title,
-                priority,
-                due,
-            } => {
-                tasks::add_task(&config, title, priority, due);
-            }
-            TaskAction::Done { id } => {
-                tasks::complete_task(&config, &id);
-            }
-            TaskAction::List => {
-                tasks::list_tasks(&config);
-            }
-        },
         None => {
             run_tui(config)?;
         }

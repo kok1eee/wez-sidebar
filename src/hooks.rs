@@ -1,50 +1,26 @@
 use anyhow::Result;
 use chrono::Utc;
-use serde::Deserialize;
 use std::{
-    fs,
     io::{self, Read as _},
-    path::PathBuf,
     process::Command,
 };
 
 use crate::config::AppConfig;
 use crate::session::{read_session_store, send_permission_notification, write_session_store};
-use crate::types::{HookPayload, Session};
+use crate::types::{HookPayload, Session, SessionTask};
 use crate::usage::cache_usage_if_stale;
 
 pub fn handle_hook(event_name: &str, config: &AppConfig) -> Result<()> {
-    // 1. Read stdin once
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
 
-    // 2. Always run built-in handler (updates sessions.json)
-    builtin_handle_hook(event_name, config, &input)?;
+    handle_hook_inner(event_name, config, &input)?;
 
-    // 3. Optionally delegate to external command
-    if let Some(ref cmd) = config.hook_command {
-        let mut child = Command::new("sh")
-            .args(["-c", &format!("{} {}", cmd, event_name)])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()?;
-
-        if let Some(ref mut stdin) = child.stdin {
-            use std::io::Write;
-            let _ = stdin.write_all(input.as_bytes());
-        }
-
-        let output = child.wait_with_output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        print!("{}", stdout);
-    } else {
-        println!("{{}}");
-    }
-
+    println!("{{}}");
     Ok(())
 }
 
-fn builtin_handle_hook(event_name: &str, config: &AppConfig, input: &str) -> Result<()> {
+fn handle_hook_inner(event_name: &str, config: &AppConfig, input: &str) -> Result<()> {
     let payload: HookPayload = match serde_json::from_str(input) {
         Ok(p) => p,
         Err(_) => return Ok(()),
@@ -54,12 +30,33 @@ fn builtin_handle_hook(event_name: &str, config: &AppConfig, input: &str) -> Res
         return Ok(());
     }
 
-    // Detect TTY and yolo mode from ancestors
-    let tty = get_tty_from_ancestors();
-    let is_yolo = detect_yolo_mode();
+    // Detect TTY and yolo mode from ancestors (single walk)
+    let (tty, is_yolo) = get_tty_and_yolo_from_ancestors();
+
+    // Extract activity and danger flag from hook payload
+    let activity = extract_activity(event_name, &payload);
+    let is_dangerous = event_name == "PreToolUse" && detect_dangerous(&payload);
+
+    // Extract user message from UserPromptSubmit
+    let user_message = if event_name == "UserPromptSubmit" {
+        payload.prompt.as_deref().map(|p| {
+            let trimmed = p.trim();
+            if trimmed.len() > 200 {
+                format!("{}…", &trimmed[..199])
+            } else {
+                trimmed.to_string()
+            }
+        }).filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+
+    // Extract tasks from TodoWrite
+    let tasks = extract_tasks(event_name, &payload);
 
     // Update session
     let cwd = payload.cwd.unwrap_or_default();
+    let git_branch = resolve_git_branch(&cwd);
     let notification_type = payload.notification_type.as_deref();
     let new_status = update_session(
         event_name,
@@ -68,12 +65,16 @@ fn builtin_handle_hook(event_name: &str, config: &AppConfig, input: &str) -> Res
         &tty,
         notification_type,
         is_yolo,
+        activity,
+        is_dangerous,
+        git_branch,
+        user_message,
+        tasks,
         &config.data_dir,
     )?;
 
     // Desktop notification on permission prompt
-    // Skip when hook_command is set (external command handles its own notifications)
-    if new_status == "waiting_input" && config.hook_command.is_none() {
+    if new_status == "waiting_input" {
         send_permission_notification(&cwd, &tty, &config.wezterm_path);
     }
 
@@ -83,70 +84,174 @@ fn builtin_handle_hook(event_name: &str, config: &AppConfig, input: &str) -> Res
     Ok(())
 }
 
-fn get_tty_from_ancestors() -> String {
-    let mut ppid = std::os::unix::process::parent_id() as i32;
-
-    for _ in 0..5 {
-        let output = Command::new("ps")
-            .args(["-o", "tty=", "-p", &ppid.to_string()])
-            .output();
-
-        if let Ok(out) = output {
-            let tty = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !tty.is_empty() && tty != "??" {
-                return format!("/dev/{}", tty);
-            }
-        }
-
-        let output = Command::new("ps")
-            .args(["-o", "ppid=", "-p", &ppid.to_string()])
-            .output();
-
-        if let Ok(out) = output {
-            if let Ok(new_ppid) = String::from_utf8_lossy(&out.stdout).trim().parse::<i32>() {
-                ppid = new_ppid;
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    String::new()
+/// Show last 2 path components: "src/config.rs" instead of just "config.rs"
+fn short_path(p: &str) -> String {
+    let path = std::path::Path::new(p);
+    let components: Vec<_> = path.components().rev().take(2).collect();
+    let parts: Vec<&str> = components.iter().rev().filter_map(|c| c.as_os_str().to_str()).collect();
+    parts.join("/")
 }
 
-fn detect_yolo_mode() -> bool {
-    let mut ppid = std::os::unix::process::parent_id() as i32;
+fn extract_activity(event_name: &str, payload: &HookPayload) -> Option<String> {
+    if event_name != "PreToolUse" {
+        return None;
+    }
 
-    for _ in 0..5 {
-        let output = Command::new("ps")
-            .args(["-o", "args=", "-p", &ppid.to_string()])
-            .output();
+    let tool = payload.tool_name.as_deref()?;
+    let input = payload.tool_input.as_ref();
 
-        if let Ok(out) = output {
-            let args = String::from_utf8_lossy(&out.stdout);
-            if args.contains("--dangerously-skip-permissions") {
-                return true;
+    let detail = match tool {
+        "Bash" => input
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .map(|cmd| {
+                let short = cmd.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+                if short.len() > 60 {
+                    format!("{}…", &short[..59])
+                } else {
+                    short
+                }
+            }),
+        "Read" | "Write" | "Edit" => input
+            .and_then(|v| v.get("file_path"))
+            .and_then(|v| v.as_str())
+            .map(short_path),
+        "Grep" => input
+            .and_then(|v| v.get("pattern"))
+            .and_then(|v| v.as_str())
+            .map(|p| format!("/{}/", p)),
+        "Glob" => input
+            .and_then(|v| v.get("pattern"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        "Agent" => input
+            .and_then(|v| v.get("description"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        _ => None,
+    };
+
+    match detail {
+        Some(d) => Some(format!("{} {}", tool, d)),
+        None => Some(tool.to_string()),
+    }
+}
+
+fn extract_tasks(event_name: &str, payload: &HookPayload) -> Option<Vec<SessionTask>> {
+    if event_name != "PreToolUse" {
+        return None;
+    }
+    if payload.tool_name.as_deref() != Some("TodoWrite") {
+        return None;
+    }
+    let input = payload.tool_input.as_ref()?;
+    let todos = input.get("todos")?.as_array()?;
+
+    let tasks: Vec<SessionTask> = todos
+        .iter()
+        .filter_map(|t| {
+            let content = t.get("content")?.as_str()?.to_string();
+            let status = t.get("status")?.as_str().unwrap_or("pending").to_string();
+            Some(SessionTask { content, status })
+        })
+        .collect();
+
+    if tasks.is_empty() { None } else { Some(tasks) }
+}
+
+fn detect_dangerous(payload: &HookPayload) -> bool {
+    let tool = match payload.tool_name.as_deref() {
+        Some(t) => t,
+        None => return false,
+    };
+    let input = match payload.tool_input.as_ref() {
+        Some(v) => v,
+        None => return false,
+    };
+
+    match tool {
+        "Bash" => {
+            if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
+                let cmd_lower = cmd.to_lowercase();
+                cmd_lower.contains("rm -rf")
+                    || cmd_lower.contains("git push --force")
+                    || cmd_lower.contains("git push -f")
+                    || cmd_lower.contains("git reset --hard")
+                    || cmd_lower.contains("git clean -f")
+                    || cmd_lower.contains("git checkout .")
+                    || cmd_lower.contains("drop table")
+                    || cmd_lower.contains("drop database")
+                    || cmd_lower.contains("truncate table")
+                    || cmd_lower.contains("> /dev/")
+                    || cmd_lower.contains("mkfs")
+                    || cmd_lower.contains("dd if=")
+            } else {
+                false
             }
         }
+        _ => false,
+    }
+}
 
-        let output = Command::new("ps")
-            .args(["-o", "ppid=", "-p", &ppid.to_string()])
-            .output();
+fn resolve_git_branch(cwd: &str) -> Option<String> {
+    if cwd.is_empty() {
+        return None;
+    }
+    Command::new("git")
+        .args(["-C", cwd, "branch", "--show-current"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
 
-        if let Ok(out) = output {
-            if let Ok(new_ppid) = String::from_utf8_lossy(&out.stdout).trim().parse::<i32>() {
-                ppid = new_ppid;
-            } else {
-                break;
-            }
-        } else {
+/// Walk the ancestor process chain once, collecting TTY and yolo mode in a single pass.
+/// Returns `(tty, is_yolo)`. Uses a single `ps -o tty=,ppid=,args=` per level: max 5 calls total.
+fn get_tty_and_yolo_from_ancestors() -> (String, bool) {
+    let mut ppid = std::os::unix::process::parent_id() as i32;
+    let mut found_tty = String::new();
+    let mut is_yolo = false;
+
+    for _ in 0..5 {
+        let Ok(out) = Command::new("ps")
+            .args(["-o", "tty=,ppid=,args=", "-p", &ppid.to_string()])
+            .output()
+        else {
             break;
+        };
+
+        let line = String::from_utf8_lossy(&out.stdout);
+        let line = line.trim();
+        if line.is_empty() {
+            break;
+        }
+
+        // Format: "tty ppid rest-of-args..."
+        let mut parts = line.splitn(3, char::is_whitespace);
+        let tty_field = parts.next().unwrap_or("").trim();
+        let ppid_field = parts.next().unwrap_or("").trim();
+        let args_field = parts.next().unwrap_or("");
+
+        if found_tty.is_empty() && !tty_field.is_empty() && tty_field != "??" {
+            found_tty = format!("/dev/{}", tty_field);
+        }
+
+        if !is_yolo && args_field.contains("--dangerously-skip-permissions") {
+            is_yolo = true;
+        }
+
+        if !found_tty.is_empty() && is_yolo {
+            break;
+        }
+
+        match ppid_field.parse::<i32>() {
+            Ok(new_ppid) => ppid = new_ppid,
+            Err(_) => break,
         }
     }
 
-    false
+    (found_tty, is_yolo)
 }
 
 pub fn determine_status(
@@ -172,55 +277,7 @@ pub fn determine_status(
     "running".to_string()
 }
 
-fn read_claude_tasks(session_id: &str) -> (Option<String>, i32, i32) {
-    let tasks_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()))
-        .join(".claude/tasks")
-        .join(session_id);
-
-    let entries = match fs::read_dir(&tasks_dir) {
-        Ok(e) => e,
-        Err(_) => return (None, 0, 0),
-    };
-
-    #[derive(Deserialize)]
-    struct TaskItem {
-        subject: String,
-        status: String,
-    }
-
-    let mut items: Vec<TaskItem> = Vec::new();
-    for entry in entries.flatten() {
-        if entry
-            .path()
-            .extension()
-            .map(|e| e == "json")
-            .unwrap_or(false)
-        {
-            if let Ok(content) = fs::read_to_string(entry.path()) {
-                if let Ok(item) = serde_json::from_str::<TaskItem>(&content) {
-                    items.push(item);
-                }
-            }
-        }
-    }
-
-    if items.is_empty() {
-        return (None, 0, 0);
-    }
-
-    let total = items.len() as i32;
-    let completed = items.iter().filter(|t| t.status == "completed").count() as i32;
-
-    let active = items
-        .iter()
-        .find(|t| t.status == "in_progress")
-        .or_else(|| items.iter().find(|t| t.status == "pending"))
-        .map(|t| t.subject.clone());
-
-    (active, completed, total)
-}
-
+#[allow(clippy::too_many_arguments)]
 pub fn update_session(
     event_name: &str,
     session_id: &str,
@@ -228,6 +285,11 @@ pub fn update_session(
     tty: &str,
     notification_type: Option<&str>,
     is_yolo: bool,
+    activity: Option<String>,
+    is_dangerous: bool,
+    git_branch: Option<String>,
+    user_message: Option<String>,
+    tasks: Option<Vec<SessionTask>>,
     data_dir: &str,
 ) -> Result<String> {
     let mut store = read_session_store(data_dir);
@@ -270,8 +332,43 @@ pub fn update_session(
         })
         .unwrap_or_else(|| tty.to_string());
 
-    let (active_task, tasks_completed, tasks_total) = read_claude_tasks(session_id);
     let new_status = determine_status(event_name, notification_type, current_status);
+
+    // Preserve previous activity if this event doesn't have one
+    let last_activity = activity.or_else(|| {
+        existing.and_then(|s| s.last_activity.clone())
+    });
+
+    // Danger flag: set on dangerous PreToolUse, clear on UserPromptSubmit (user approved)
+    let final_dangerous = if event_name == "UserPromptSubmit" {
+        false
+    } else if is_dangerous {
+        true
+    } else {
+        existing.map(|s| s.is_dangerous).unwrap_or(false)
+    };
+
+    // Git branch: preserve previous if not resolved this time
+    let final_branch = git_branch.or_else(|| {
+        existing.and_then(|s| s.git_branch.clone())
+    });
+
+    // User message: update on UserPromptSubmit, preserve otherwise
+    let final_user_message = user_message.or_else(|| {
+        existing.and_then(|s| s.last_user_message.clone())
+    });
+
+    // User message timestamp: set on UserPromptSubmit, preserve otherwise
+    let final_user_message_at = if event_name == "UserPromptSubmit" {
+        Some(now.clone())
+    } else {
+        existing.and_then(|s| s.last_user_message_at.clone())
+    };
+
+    // Tasks: update on TodoWrite, preserve otherwise
+    let final_tasks = tasks.unwrap_or_else(|| {
+        existing.map(|s| s.tasks.clone()).unwrap_or_default()
+    });
 
     store.sessions.insert(
         session_id.to_string(),
@@ -282,10 +379,13 @@ pub fn update_session(
             status: new_status.clone(),
             created_at,
             updated_at: now.clone(),
-            active_task,
-            tasks_completed,
-            tasks_total,
             is_yolo,
+            last_activity,
+            is_dangerous: final_dangerous,
+            git_branch: final_branch,
+            last_user_message: final_user_message,
+            last_user_message_at: final_user_message_at,
+            tasks: final_tasks,
         },
     );
 
@@ -314,10 +414,13 @@ mod tests {
             status: status.to_string(),
             created_at: updated_at.to_string(),
             updated_at: updated_at.to_string(),
-            active_task: None,
-            tasks_completed: 0,
-            tasks_total: 0,
             is_yolo: false,
+            last_activity: None,
+            is_dangerous: false,
+            git_branch: None,
+            last_user_message: None,
+            last_user_message_at: None,
+            tasks: Vec::new(),
         }
     }
 
@@ -428,6 +531,11 @@ mod tests {
             "/dev/ttys001",
             None,
             false,
+            None,
+            false,
+            None,
+            None,
+            None,
             dir.path().to_str().unwrap(),
         )
         .unwrap();
@@ -458,6 +566,11 @@ mod tests {
             "/dev/ttys005",
             None,
             false,
+            None,
+            false,
+            None,
+            None,
+            None,
             dir.path().to_str().unwrap(),
         )
         .unwrap();
@@ -480,6 +593,11 @@ mod tests {
             "/dev/ttys001",
             None,
             false,
+            None,
+            false,
+            None,
+            None,
+            None,
             dir.path().to_str().unwrap(),
         )
         .unwrap();
@@ -492,6 +610,11 @@ mod tests {
             "/dev/ttys001",
             None,
             false,
+            None,
+            false,
+            None,
+            None,
+            None,
             dir.path().to_str().unwrap(),
         )
         .unwrap();
@@ -504,6 +627,11 @@ mod tests {
             "/dev/ttys001",
             None,
             false,
+            None,
+            false,
+            None,
+            None,
+            None,
             dir.path().to_str().unwrap(),
         )
         .unwrap();
@@ -516,6 +644,11 @@ mod tests {
             "/dev/ttys001",
             None,
             false,
+            None,
+            false,
+            None,
+            None,
+            None,
             dir.path().to_str().unwrap(),
         )
         .unwrap();
@@ -536,6 +669,11 @@ mod tests {
             "",
             None,
             false,
+            None,
+            false,
+            None,
+            None,
+            None,
             dir.path().to_str().unwrap(),
         )
         .unwrap();

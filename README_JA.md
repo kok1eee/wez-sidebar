@@ -1,33 +1,34 @@
 # wez-sidebar
 
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code) のセッション・使用量・タスクを監視する WezTerm サイドバー / ドック。
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) のセッションをリアルタイム監視する WezTerm サイドバー / ドック。
 
 [English](README.md)
 
-| Sidebar (MacBook) | Dock (外部モニター) |
-|:---:|:---:|
-| ![Sidebar](docs/images/sidebar-with-panes.png) | ![Dock](docs/images/dock-mode.png) |
+## なぜ WezTerm か
 
-| モード選択 | Overlay |
-|:---:|:---:|
-| ![Select](docs/images/mode-select.png) | ![Overlay](docs/images/wezterm-overlay.png) |
+WezTerm はペイン分割・セッション管理を内蔵しており、tmux を置き換える。wez-sidebar は **WezTerm のペインとして動作** し、WezTerm CLI（`wezterm cli list`, `wezterm cli get-text`, `wezterm cli activate-pane`）でセッション情報を取得する。
+
+これは意図的なスコープ。WezTerm で複数の Claude Code セッションをペイン分割で並列実行しているユーザー向けのツール。他のターミナルでは動作しないが、それは制約ではなく特徴として割り切っている。
 
 ## 機能
 
-- **セッション監視** - Claude Code セッションの状態（実行中 / 入力待ち / 停止）、稼働時間、タスク進捗をリアルタイム表示
-- **yolo モード検出** - `--dangerously-skip-permissions` で起動したセッションをプロセスツリー遡行で自動検出
-- **API 使用量** - Anthropic API の使用量（5時間制限・週間制限）をカラーコード付きで表示。hook 発火時に10分クールダウンで更新
-- **タスク管理** - 内蔵 CLI（`wez-sidebar task add/done/list`）+ 外部連携用 JSON ファイル
-- **内蔵 hook ハンドラー** - `sessions.json` を自律管理。外部依存なしで動作
-- **2つの表示モード** - Sidebar（MacBook 向け右バー）または Dock（外部モニター向け下部バー）
-- **ペイン連携** - Enter キーまたは数字キーで対象セッションの WezTerm ペインに即切り替え
-- **デスクトップ通知** - permission prompt 時に macOS 通知（`terminal-notifier` 使用）
+- **セッション監視** — ステータス（実行中 / 入力待ち / 停止）、稼働時間、git ブランチ、リアルタイムアクティビティ
+- **アクティビティ表示** — 各セッションが今何をしているか（`Edit src/config.rs`, `Bash cargo test` 等）
+- **危険コマンド警告** — `rm -rf`, `git push --force` 等を赤字 + ⚠ マーカーで警告
+- **ユーザーメッセージ表示** — 直近のユーザー発言 + 経過時間（`バグを直して (3m前)`）
+- **タスク進捗（ドック）** — Claude の `TodoWrite` タスクをドックモードで表示（✓ 完了, ● 進行中, ○ 未着手）
+- **yolo モード検出** — `--dangerously-skip-permissions` をプロセスツリー遡行で自動検出
+- **API 使用量** — Anthropic API 使用量（5時間 / 週間）をカラーコード表示
+- **2つの表示モード** — Sidebar（MacBook 向け右ペイン）/ Dock（外部モニター向け下部ペイン）
+- **ペイン切り替え** — Enter キーまたは数字キーで対象セッションの WezTerm ペインに即ジャンプ
+- **デスクトップ通知** — permission prompt 時に macOS 通知（`terminal-notifier` 使用）
+- **ポーリングなし** — すべて hook → file watcher のプッシュ型。CPU 負荷ゼロ
 
 ## 必要環境
 
 - [WezTerm](https://wezfurlong.org/wezterm/)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-- Rust ツールチェーン（ビルド用）
+- Rust ツールチェーン（ソースビルド時のみ）
 
 ## インストール
 
@@ -71,17 +72,14 @@ wez-sidebar init
 
 以下を対話的にセットアップ:
 1. Claude Code hooks を `~/.claude/settings.json` に登録
-2. タスク管理のセットアップ（オプション）
-3. WezTerm キーバインドの案内
-
-### 手動セットアップ
+2. WezTerm キーバインドの案内
 
 <details>
-<summary>手動で設定する場合</summary>
+<summary>手動セットアップ</summary>
 
 #### 1. Hook の登録
 
-`~/.claude/settings.json` に以下を追加:
+`~/.claude/settings.json` に追加:
 
 ```json
 {
@@ -105,17 +103,24 @@ wez-sidebar init
 }
 ```
 
-#### 2. WezTerm の設定
-
-サイドバーを開くキーバインドを追加:
+#### 2. WezTerm キーバインド
 
 ```lua
+-- サイドバー（MacBook 向け）
 {
   key = "b",
   mods = "LEADER",
   action = wezterm.action_callback(function(window, pane)
-    local tab = window:active_tab()
-    tab:active_pane():split({ direction = "Right", args = { "wez-sidebar" } })
+    pane:split({ direction = "Right", size = 0.2, args = { "wez-sidebar" } })
+  end),
+}
+
+-- ドック（外部モニター向け）
+{
+  key = "d",
+  mods = "LEADER",
+  action = wezterm.action_callback(function(window, pane)
+    pane:split({ direction = "Bottom", size = 0.25, args = { "wez-sidebar", "dock" } })
   end),
 }
 ```
@@ -123,6 +128,33 @@ wez-sidebar init
 </details>
 
 これだけで動く。設定ファイルは不要。
+
+## カード表示
+
+### サイドバー（コンパクト、コンテンツ 3 行）
+
+```
+╭─ 🟢 my-project ⠋ ────╮
+│ 2h30m  main           │
+│ Edit src/config.rs     │
+│ バグを直して (3m前)    │
+╰───────────────────────╯
+```
+
+### ドック（タスク進捗付き）
+
+```
+╭─ 🟢 my-project ⠋ ─────────────╮
+│ 2h30m  main                    │
+│ Edit src/hooks.rs              │
+│ 認証機能を実装して (5m前)       │
+│ ✓ 型を追加                     │
+│ ● hooks を編集                 │
+│ ○ テスト追加                   │
+╰────────────────────────────────╯
+```
+
+同じ `render_session_card` 関数が `area.height` に応じて動的にコンテンツ量を調整する。モード分岐のコードは不要。
 
 ## セッションマーカー
 
@@ -135,43 +167,9 @@ wez-sidebar init
 
 | ステータス | 意味 |
 |------------|------|
-| ▶ | 実行中 |
+| ⠋ (spinner) | 実行中 |
 | ? | 入力待ち（permission prompt） |
 | ■ | 停止済み |
-
-## タスク管理（オプション）
-
-wez-sidebar にはシンプルなタスク CLI が内蔵されている。タスクは `~/.config/wez-sidebar/tasks.json` に保存される。
-
-```bash
-# タスク追加
-wez-sidebar task add "認証機能を実装" -p 1 -d 2026-03-10
-
-# タスク一覧
-wez-sidebar task list
-
-# タスク完了
-wez-sidebar task done <id>
-```
-
-TUI パネルにタスクを表示するには、config で `tasks_file` を設定:
-
-```toml
-# ~/.config/wez-sidebar/config.toml
-tasks_file = "~/.config/wez-sidebar/tasks.json"
-```
-
-ファイルの変更を file watcher でリアルタイムに反映。
-
-外部ツール（Asana 同期スクリプト、GitHub Actions 等）から同じ JSON 形式で書き出すことも可能:
-
-```json
-{
-  "tasks": [
-    { "id": "1", "title": "タスク名", "status": "pending", "priority": 1, "due_on": "2026-03-10" }
-  ]
-}
-```
 
 ## 設定項目
 
@@ -179,38 +177,9 @@ tasks_file = "~/.config/wez-sidebar/tasks.json"
 
 | キー | デフォルト | 説明 |
 |------|-----------|------|
-| `wezterm_path` | 自動検出 | WezTerm バイナリのフルパス |
+| `wezterm_path` | 自動検出 | WezTerm バイナリのフルパス（PATH 問題がある場合に設定） |
 | `stale_threshold_mins` | `30` | セッションを非アクティブと見なすまでの分数 |
 | `data_dir` | `~/.config/wez-sidebar` | `sessions.json` / `usage-cache.json` の保存先 |
-| `tasks_file` | *（なし）* | タスク JSON ファイルのパス（TUI タスクパネルを有効化） |
-| `hook_command` | *（内蔵）* | hook 処理を委譲する外部コマンド |
-| `api_url` | *（なし）* | タスク取得用 REST API の URL |
-
-詳細は [`config.example.toml`](config.example.toml) を参照。
-
-### Hook の外部委譲
-
-デフォルトでは `wez-sidebar hook` がすべてを内部処理する。外部ツールに委譲する場合（セッション管理は維持しつつ）:
-
-```toml
-hook_command = "my-custom-tool hook"
-```
-
-wez-sidebar が `sessions.json` を更新した後、外部コマンドに hook ペイロードが stdin で転送される。
-
-## 表示モード
-
-### Sidebar（デフォルト）
-
-```bash
-wez-sidebar
-```
-
-### Dock（横長下部バー）
-
-```bash
-wez-sidebar dock
-```
 
 ## キーバインド
 
@@ -218,7 +187,7 @@ wez-sidebar dock
 |------|---------|------|
 | `j`/`k` | 上下移動 | 上下移動 |
 | `Enter` | ペイン切り替え | ペイン切り替え |
-| `t` | タスクモード | - |
+| `1`-`9` | 番号で切り替え | 番号で切り替え |
 | `Tab`/`h`/`l` | - | カラム移動 |
 | `p` | プレビュー切替 | - |
 | `f` | 全セッション表示切替 | 全セッション表示切替 |
@@ -232,13 +201,24 @@ wez-sidebar dock
 ```
 Claude Code ──hook──→ wez-sidebar hook <event>
                               │
-                        sessions.json（セッション状態）
-                        usage-cache.json（API 使用量、10分クールダウン）
+                    ┌─────────┴───────────┐
+                    │ session 更新         │
+                    │ activity 抽出        │
+                    │ danger 検出          │
+                    │ user message 取得    │
+                    │ TodoWrite タスク取得 │
+                    │ git branch 取得      │
+                    │ yolo mode 検出       │
+                    └─────────┬───────────┘
                               │
-                        file watcher
+                    sessions.json + usage-cache.json
                               │
-                        wez-sidebar TUI
+                         file watcher
+                              │
+                    wez-sidebar TUI（ポーリングなし）
 ```
+
+すべてのデータは hook 経由で流れる。TUI はファイル変更にのみ反応し、ポーリングもサブプロセスも走らない。
 
 ## ライセンス
 

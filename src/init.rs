@@ -20,8 +20,6 @@ pub fn run_init() {
 
     setup_hooks();
     println!();
-    setup_tasks();
-    println!();
     print_wezterm_guide();
 }
 
@@ -31,7 +29,6 @@ fn setup_hooks() {
 
     let settings_path = expand_tilde(CLAUDE_SETTINGS_PATH);
 
-    // Check current state
     let (settings_exists, hooks_registered) = check_hooks_status(&settings_path);
 
     if hooks_registered {
@@ -66,7 +63,6 @@ fn setup_hooks() {
     }
 }
 
-/// Check if hooks are already registered
 fn check_hooks_status(settings_path: &PathBuf) -> (bool, bool) {
     let content = match fs::read_to_string(settings_path) {
         Ok(c) => c,
@@ -80,7 +76,6 @@ fn check_hooks_status(settings_path: &PathBuf) -> (bool, bool) {
     (true, all_present)
 }
 
-/// Register hooks in settings.json
 fn register_hooks(settings_path: &PathBuf, exists: bool) -> bool {
     let mut settings: serde_json::Value = if exists {
         match fs::read_to_string(settings_path) {
@@ -109,7 +104,6 @@ fn register_hooks(settings_path: &PathBuf, exists: bool) -> bool {
             "command": command
         }]);
 
-        // Only add if not already present
         if !hooks_obj.contains_key(*event) {
             hooks_obj.insert(event.to_string(), hook_entry);
         }
@@ -127,7 +121,6 @@ fn register_hooks(settings_path: &PathBuf, exists: bool) -> bool {
     fs::write(settings_path, json).is_ok()
 }
 
-/// Print manual hook registration instructions
 fn print_manual_hooks() {
     println!();
     println!("  ```json");
@@ -145,82 +138,9 @@ fn print_manual_hooks() {
     println!("  ```");
 }
 
-/// Step 2: Task setup guide
-fn setup_tasks() {
-    println!("📋 Step 2: Task management (optional)\n");
-    println!("  wez-sidebar can display tasks in the TUI panel.");
-    println!("  Choose how you want to manage tasks:\n");
-    println!("  [1] Built-in CLI (recommended for personal use)");
-    println!("      $ wez-sidebar task add \"Implement auth\" -p 1 -d 2026-03-10");
-    println!("      $ wez-sidebar task list");
-    println!("      $ wez-sidebar task done <id>\n");
-    println!("  [2] External JSON file (for tool integrations)");
-    println!("      Any tool can write to the same JSON format:");
-    println!("      {{\"tasks\": [{{\"id\": \"1\", \"title\": \"...\", \"status\": \"pending\", \"priority\": 1}}]}}\n");
-    println!("  [3] REST API (for remote task sources)");
-    println!("      Set api_url in config.toml to fetch tasks from GET {{api_url}}/api/tasks/cache\n");
-    println!("  [0] Skip - I don't need tasks\n");
-
-    print!("  Choose [0-3, default: 0] ");
-    io::stdout().flush().unwrap();
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    let choice = input.trim();
-
-    match choice {
-        "1" | "2" => {
-            create_tasks_config(false);
-            if choice == "1" {
-                println!("\n  Try it now:");
-                println!("    $ wez-sidebar task add \"My first task\" -p 1");
-            }
-        }
-        "3" => {
-            create_tasks_config(true);
-        }
-        _ => {
-            println!("  Skipped. You can enable tasks later in ~/.config/wez-sidebar/config.toml");
-        }
-    }
-}
-
-/// Create config.toml with tasks_file (and optionally api_url placeholder)
-fn create_tasks_config(with_api: bool) {
-    let config_path = expand_tilde("~/.config/wez-sidebar/config.toml");
-
-    let existing = fs::read_to_string(&config_path).unwrap_or_default();
-
-    if existing.contains("tasks_file") {
-        println!("  ✅ tasks_file is already configured in config.toml");
-        return;
-    }
-
-    let mut additions = String::new();
-    additions.push_str("tasks_file = \"~/.config/wez-sidebar/tasks.json\"\n");
-    if with_api {
-        additions.push_str("# api_url = \"http://localhost:3000\"\n");
-    }
-
-    let new_content = if existing.is_empty() {
-        additions
-    } else {
-        format!("{}\n{}", existing.trim_end(), additions)
-    };
-
-    if let Some(parent) = config_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    match fs::write(&config_path, new_content) {
-        Ok(_) => println!("  ✅ Updated {}", config_path.display()),
-        Err(e) => println!("  ❌ Failed to write config: {}", e),
-    }
-}
-
-/// Step 3: WezTerm configuration guide
+/// Step 2: WezTerm configuration guide
 fn print_wezterm_guide() {
-    println!("🖥️  Step 3: WezTerm keybinding\n");
+    println!("🖥️  Step 2: WezTerm keybinding\n");
     println!("  Add a keybinding to your wezterm.lua to open the sidebar:\n");
     println!("  ```lua");
     println!("  {{");
