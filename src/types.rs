@@ -37,8 +37,10 @@ pub struct Session {
     pub tasks: Vec<SessionTask>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionTask {
+    #[serde(default)]
+    pub id: String,
     pub content: String,
     pub status: String,
 }
@@ -126,6 +128,7 @@ pub struct HookPayload {
     pub notification_type: Option<String>,
     pub tool_name: Option<String>,
     pub tool_input: Option<serde_json::Value>,
+    pub tool_response: Option<serde_json::Value>,
     pub prompt: Option<String>,
 }
 

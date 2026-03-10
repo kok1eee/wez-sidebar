@@ -52,8 +52,14 @@ fn handle_hook_inner(event_name: &str, config: &AppConfig, input: &str) -> Resul
         None
     };
 
-    // Extract tasks from TodoWrite
-    let tasks = extract_tasks(event_name, &payload);
+    // Extract tasks from TaskCreate/TaskUpdate
+    let existing_tasks = {
+        let store = read_session_store(&config.data_dir);
+        store.sessions.get(&payload.session_id)
+            .map(|s| s.tasks.clone())
+            .unwrap_or_default()
+    };
+    let tasks = extract_tasks(event_name, &payload, &existing_tasks);
 
     // Update session
     let cwd = payload.cwd.unwrap_or_default();
@@ -139,26 +145,73 @@ fn extract_activity(event_name: &str, payload: &HookPayload) -> Option<String> {
     }
 }
 
-fn extract_tasks(event_name: &str, payload: &HookPayload) -> Option<Vec<SessionTask>> {
-    if event_name != "PreToolUse" {
-        return None;
-    }
-    if payload.tool_name.as_deref() != Some("TodoWrite") {
-        return None;
-    }
-    let input = payload.tool_input.as_ref()?;
-    let todos = input.get("todos")?.as_array()?;
+fn extract_tasks(
+    event_name: &str,
+    payload: &HookPayload,
+    existing_tasks: &[SessionTask],
+) -> Option<Vec<SessionTask>> {
+    let tool = payload.tool_name.as_deref()?;
 
-    let tasks: Vec<SessionTask> = todos
-        .iter()
-        .filter_map(|t| {
-            let content = t.get("content")?.as_str()?.to_string();
-            let status = t.get("status")?.as_str().unwrap_or("pending").to_string();
-            Some(SessionTask { content, status })
-        })
-        .collect();
+    match (event_name, tool) {
+        // PreToolUse TaskCreate: add with placeholder ID (will be replaced by PostToolUse)
+        ("PreToolUse", "TaskCreate") => {
+            let input = payload.tool_input.as_ref()?;
+            let subject = input.get("subject")?.as_str()?;
+            let mut tasks = existing_tasks.to_vec();
+            tasks.push(SessionTask {
+                id: String::new(), // placeholder — PostToolUse will fill the real ID
+                content: subject.to_string(),
+                status: "pending".to_string(),
+            });
+            Some(tasks)
+        }
+        // PostToolUse TaskCreate: fill in real ID from tool_response
+        ("PostToolUse", "TaskCreate") => {
+            let resp = payload.tool_response.as_ref()?;
+            let real_id = resp.get("task")?.get("id")?.as_str()?;
+            let mut tasks = existing_tasks.to_vec();
+            // Update the last task with empty ID
+            if let Some(task) = tasks.iter_mut().rev().find(|t| t.id.is_empty()) {
+                task.id = real_id.to_string();
+                Some(tasks)
+            } else {
+                None
+            }
+        }
+        // PreToolUse TaskUpdate: update status/subject by ID
+        ("PreToolUse", "TaskUpdate") => {
+            let input = payload.tool_input.as_ref()?;
+            let task_id = input.get("taskId")?.as_str()?;
+            let new_status = input.get("status").and_then(|v| v.as_str());
+            let new_subject = input.get("subject").and_then(|v| v.as_str());
 
-    if tasks.is_empty() { None } else { Some(tasks) }
+            if new_status.is_none() && new_subject.is_none() {
+                return None;
+            }
+
+            let mut tasks = existing_tasks.to_vec();
+
+            // Handle deletion
+            if new_status == Some("deleted") {
+                let before = tasks.len();
+                tasks.retain(|t| t.id != task_id);
+                return if tasks.len() != before { Some(tasks) } else { None };
+            }
+
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == task_id) {
+                if let Some(s) = new_status {
+                    task.status = s.to_string();
+                }
+                if let Some(s) = new_subject {
+                    task.content = s.to_string();
+                }
+                Some(tasks)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 fn detect_dangerous(payload: &HookPayload) -> bool {
