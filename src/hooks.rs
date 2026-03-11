@@ -233,13 +233,29 @@ fn merge_subagent_tasks(event_name: &str, payload: &HookPayload, data_dir: &str)
     let mut store = read_session_store(data_dir);
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Find the most recently updated running session with a TTY (= parent)
-    let parent_id = store
+    // Find parent session: prefer CWD match, fallback to most recently updated running session
+    let subagent_cwd = payload.cwd.as_deref().unwrap_or("");
+    let running_sessions: Vec<_> = store
         .sessions
         .values()
         .filter(|s| !s.tty.is_empty() && s.status == "running")
-        .max_by_key(|s| s.updated_at.clone())
-        .map(|s| s.session_id.clone());
+        .collect();
+
+    let parent_id = if !subagent_cwd.is_empty() {
+        // Match by CWD: subagent runs in the same directory as parent
+        running_sessions
+            .iter()
+            .filter(|s| subagent_cwd.starts_with(&s.home_cwd))
+            .max_by_key(|s| s.home_cwd.len()) // longest prefix = most specific match
+            .or_else(|| running_sessions.iter().max_by_key(|s| s.updated_at.as_str()))
+            .map(|s| s.session_id.clone())
+    } else {
+        // No CWD available: fallback to most recently updated
+        running_sessions
+            .iter()
+            .max_by_key(|s| s.updated_at.as_str())
+            .map(|s| s.session_id.clone())
+    };
 
     let parent_id = match parent_id {
         Some(id) => id,

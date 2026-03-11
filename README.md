@@ -17,11 +17,14 @@ This is an intentional scope decision: wez-sidebar is for WezTerm users who run 
 - **Dangerous command warning** — `rm -rf`, `git push --force`, etc. highlighted in red with ⚠ marker
 - **User message display** — Last user prompt with elapsed time (`fix the bug (3m ago)`)
 - **Task progress (dock)** — Claude's `TodoWrite` tasks shown in dock mode (✓ done, ● in progress, ○ pending)
+- **Subagent tracking** — Active subagent count displayed on parent session card
+- **Disconnected sessions** — Sessions whose WezTerm pane was closed shown with ⚫ marker (24h retention)
 - **Yolo mode detection** — Detects `--dangerously-skip-permissions` via process tree inspection
 - **Usage limits** — Anthropic API usage (5-hour / weekly) with color-coded indicators
 - **Two display modes** — Sidebar (right pane for MacBook) or Dock (bottom pane for external monitors)
 - **Pane switching** — Jump to any session's WezTerm pane with Enter or number keys
 - **Desktop notifications** — macOS notification on permission prompts (via `terminal-notifier`)
+- **Orphan reaper** — Automatically detects and kills orphaned Claude Code processes not attached to any WezTerm pane (opt-in)
 - **Zero polling** — All data flows through hooks → file watcher; no CPU wasted on polling
 
 ## Requirements
@@ -181,6 +184,23 @@ All settings are optional. Create `~/.config/wez-sidebar/config.toml` only if ne
 | `stale_threshold_mins` | `30` | Minutes before a session is considered stale |
 | `data_dir` | `~/.config/wez-sidebar` | Directory for `sessions.json` and `usage-cache.json` |
 
+### Orphan Reaper
+
+Disabled by default. Add to `config.toml`:
+
+```toml
+[reaper]
+enabled = true
+threshold_hours = 3  # Kill orphans older than this
+```
+
+When enabled, the TUI checks every 5 minutes for Claude Code processes not attached to any WezTerm pane. You can also run it manually:
+
+```bash
+wez-sidebar reap --dry  # Preview orphans without killing
+wez-sidebar reap        # Kill orphaned processes (SIGTERM)
+```
+
 ## Keybindings
 
 | Key | Sidebar | Dock |
@@ -207,6 +227,7 @@ Claude Code ──hook──→ wez-sidebar hook <event>
                     │ danger detection     │
                     │ user message capture │
                     │ TodoWrite tasks      │
+                    │ subagent tracking    │
                     │ git branch           │
                     │ yolo mode detection  │
                     └─────────┬───────────┘
@@ -216,9 +237,13 @@ Claude Code ──hook──→ wez-sidebar hook <event>
                          file watcher
                               │
                     wez-sidebar TUI (zero polling)
+                              │
+                    reaper (opt-in, every 5 min)
+                    └→ ps + wezterm cli list → kill orphans
 ```
 
 All data flows through hooks. The TUI only reacts to file changes — no polling, no subprocesses.
+The reaper periodically compares running `claude` processes against WezTerm panes to detect orphans.
 
 ## License
 
