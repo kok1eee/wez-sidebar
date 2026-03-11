@@ -33,6 +33,12 @@ fn handle_hook_inner(event_name: &str, config: &AppConfig, input: &str) -> Resul
     // Detect TTY and yolo mode from ancestors (single walk)
     let (tty, is_yolo) = get_tty_and_yolo_from_ancestors();
 
+    // Subagent handling: no TTY means this is a subagent hook.
+    // Merge task events into the parent session; skip everything else.
+    if tty.is_empty() {
+        return merge_subagent_tasks(event_name, &payload, &config.data_dir);
+    }
+
     // Extract activity and danger flag from hook payload
     let activity = extract_activity(event_name, &payload);
     let is_dangerous = event_name == "PreToolUse" && detect_dangerous(&payload);
@@ -213,6 +219,34 @@ fn apply_task_event(
         }
         _ => false,
     }
+}
+
+/// Merge subagent task events into the most recently updated running parent session.
+/// Non-task events from subagents are silently ignored (prevents ghost sessions).
+fn merge_subagent_tasks(event_name: &str, payload: &HookPayload, data_dir: &str) -> Result<()> {
+    let mut store = read_session_store(data_dir);
+
+    // Find the most recently updated running session with a TTY (= parent)
+    let parent_id = store
+        .sessions
+        .values()
+        .filter(|s| !s.tty.is_empty() && s.status == "running")
+        .max_by_key(|s| s.updated_at.clone())
+        .map(|s| s.session_id.clone());
+
+    let parent_id = match parent_id {
+        Some(id) => id,
+        None => return Ok(()), // No running parent found
+    };
+
+    if let Some(parent) = store.sessions.get_mut(&parent_id) {
+        if apply_task_event(event_name, payload, &mut parent.tasks) {
+            parent.updated_at = chrono::Utc::now().to_rfc3339();
+            store.updated_at = parent.updated_at.clone();
+            write_session_store(&store, data_dir)?;
+        }
+    }
+    Ok(())
 }
 
 fn detect_dangerous(payload: &HookPayload) -> bool {
