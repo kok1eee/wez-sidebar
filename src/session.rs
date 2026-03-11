@@ -140,6 +140,10 @@ pub fn load_sessions_data(config: &AppConfig) -> Vec<SessionItem> {
     let mut sessions: Vec<SessionItem> = Vec::new();
 
     for sess in store.sessions.values() {
+        // Skip subagent sessions (no TTY) — they never fire Stop hooks
+        if sess.tty.is_empty() {
+            continue;
+        }
         let pane = tty_to_pane.get(&sess.tty);
         let name = std::path::Path::new(&sess.home_cwd)
             .file_name()
