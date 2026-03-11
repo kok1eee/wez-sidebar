@@ -447,15 +447,15 @@ pub fn update_session(
         .map(|s| s.created_at.clone())
         .unwrap_or_else(|| now.clone());
     let home_cwd = cwd.to_string();
-    let final_tty = existing
-        .and_then(|s| {
-            if s.tty.is_empty() {
-                None
-            } else {
-                Some(s.tty.clone())
-            }
-        })
-        .unwrap_or_else(|| tty.to_string());
+    // Use the new TTY if provided; fall back to existing TTY only when new is empty
+    // (e.g. subagent hooks have empty TTY and should not overwrite parent's TTY)
+    let final_tty = if tty.is_empty() {
+        existing
+            .map(|s| s.tty.clone())
+            .unwrap_or_default()
+    } else {
+        tty.to_string()
+    };
 
     let new_status = determine_status(event_name, notification_type, current_status);
 
