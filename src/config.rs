@@ -15,6 +15,8 @@ pub struct AppConfig {
     pub data_dir: String,
     #[serde(default)]
     pub reaper: ReaperConfig,
+    #[serde(default)]
+    pub kanban: KanbanConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,6 +35,37 @@ impl Default for ReaperConfig {
     }
 }
 
+/// Kanban mode configuration. Lives under `[kanban]` in config.toml.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct KanbanConfig {
+    /// Switch to flat view when fewer than this many sessions are active
+    /// (set to 0 to always use kanban when tasks exist).
+    pub auto_flat_threshold: usize,
+    /// Minutes a task may sit in `review` before a block notification fires.
+    pub block_alert_minutes: u32,
+    /// Skip the review column: move tasks directly from running → done on
+    /// Stop hook (Cline Kanban style auto pipeline).
+    pub auto_approve: bool,
+    /// `terminal-notifier -sound` argument (e.g. "Basso").
+    pub block_alert_sound: String,
+    /// Cooldown (seconds) between repeated block alerts for the same task.
+    /// `0` means alert once per review stint (dedupe via `block_alerted_at`).
+    pub block_alert_cooldown_secs: u64,
+}
+
+impl Default for KanbanConfig {
+    fn default() -> Self {
+        Self {
+            auto_flat_threshold: 3,
+            block_alert_minutes: 5,
+            auto_approve: false,
+            block_alert_sound: "Basso".to_string(),
+            block_alert_cooldown_secs: 0,
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -42,6 +75,7 @@ impl Default for AppConfig {
             stale_threshold_mins: 30,
             data_dir: "~/.config/wez-sidebar".to_string(),
             reaper: ReaperConfig::default(),
+            kanban: KanbanConfig::default(),
         }
     }
 }

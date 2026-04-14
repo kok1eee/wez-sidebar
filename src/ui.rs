@@ -21,14 +21,16 @@ use std::{
     time::Duration,
 };
 
-use crate::app::App;
+use crate::app::{App, KanbanCard};
 use crate::config::AppConfig;
 use crate::reaper::reap_orphans;
 use crate::session::{
     activate_pane, delete_session, get_sessions_file_path,
     load_sessions_data,
 };
-use crate::types::{AppEvent, SessionItem};
+use crate::types::{
+    AppEvent, EffectiveView, KanbanColumn, KanbanTask, SessionItem, TaskStatus,
+};
 use crate::usage::load_usage_from_cache;
 
 // ============================================================================
@@ -68,6 +70,13 @@ fn ui(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
+    match app.effective_view_mode() {
+        EffectiveView::Kanban => render_sidebar_sections(frame, app, area),
+        EffectiveView::Flat => render_sessions_flat(frame, app, area),
+    }
+}
+
+fn render_sessions_flat(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible = app.visible_sessions();
     let selected = app.session_state.selected().unwrap_or(0);
     let total = visible.len();
@@ -132,6 +141,189 @@ fn render_sessions(frame: &mut Frame, app: &mut App, area: Rect) {
         let card_area = Rect::new(cards_area.x, y, cards_area.width, card_height);
         render_session_card(frame, sess, is_selected, app.tick, card_area);
     }
+}
+
+/// Sidebar kanban: render Active / Review / Done as vertical sections.
+///
+/// Each section has a header row (`▼ Active (N)` or `▶ Active (N)` when
+/// collapsed). Headers count as "cards" for keyboard navigation — selecting a
+/// header + pressing Space/Enter toggles its collapse state.
+fn render_sidebar_sections(frame: &mut Frame, app: &mut App, area: Rect) {
+    let cards = app.unified_cards();
+    let card_height = 5u16;
+
+    // Title bar row (consistent with flat view)
+    let title = format!(" 🖥 Kanban ({}) ", cards.len());
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        ))),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
+    let mut y = area.y + 1;
+    let max_y = area.y + area.height;
+
+    // Track global card index so `app.selected_card` aligns with visible
+    // card positions. Headers never move the selection cursor.
+    let mut card_idx: usize = 0;
+
+    for col in KanbanColumn::ALL {
+        let col_cards: Vec<KanbanCard<'_>> = cards
+            .iter()
+            .filter(|c| c.column() == Some(col))
+            .copied()
+            .collect();
+        let collapsed = app.section_collapsed[col.index()];
+
+        // Header row (1 line)
+        if y >= max_y {
+            break;
+        }
+        let glyph = if collapsed { "▶" } else { "▼" };
+        let header = format!(" {} {} ({})", glyph, col.label(), col_cards.len());
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                header,
+                Style::default()
+                    .fg(column_color(col))
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            Rect::new(area.x, y, area.width, 1),
+        );
+        y += 1;
+
+        if collapsed {
+            card_idx += col_cards.len();
+            continue;
+        }
+
+        for card in col_cards {
+            if y + card_height > max_y {
+                card_idx += 1;
+                continue;
+            }
+            let is_selected = app.selected_card == card_idx;
+            let card_area = Rect::new(area.x, y, area.width, card_height);
+            render_kanban_card(frame, &card, is_selected, app.tick, card_area);
+            y += card_height;
+            card_idx += 1;
+        }
+    }
+}
+
+fn column_color(col: KanbanColumn) -> Color {
+    match col {
+        KanbanColumn::Active => Color::Green,
+        KanbanColumn::Review => Color::Yellow,
+        KanbanColumn::Done => Color::DarkGray,
+    }
+}
+
+/// Render a single kanban card — dispatches to session-based or task-only rendering.
+pub fn render_kanban_card(
+    frame: &mut Frame,
+    card: &KanbanCard<'_>,
+    is_selected: bool,
+    tick: u32,
+    area: Rect,
+) {
+    match card {
+        KanbanCard::Session(s) => render_session_card(frame, s, is_selected, tick, area),
+        KanbanCard::SessionWithTask(s, t) => {
+            render_session_card_with_title(frame, s, Some(&t.title), is_selected, tick, area)
+        }
+        KanbanCard::TaskOnly(t) => render_task_card(frame, t, is_selected, area),
+    }
+}
+
+/// Render a task card that has no bound live session — shows title, status,
+/// and cwd. Style is subdued (DarkGray) since there is no live spinner.
+pub fn render_task_card(
+    frame: &mut Frame,
+    task: &KanbanTask,
+    is_selected: bool,
+    area: Rect,
+) {
+    let (icon, color) = match task.status {
+        TaskStatus::Backlog => ("○", Color::DarkGray),
+        TaskStatus::Running => ("●", Color::Green),
+        TaskStatus::Review => ("?", Color::Yellow),
+        TaskStatus::Done => ("■", Color::Blue),
+        TaskStatus::Trash => ("✕", Color::DarkGray),
+    };
+
+    let border_style = if is_selected {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(color)
+    };
+
+    let inner_w = (area.width as usize).saturating_sub(2);
+    let max_title = inner_w.saturating_sub(6); // "{} " + id(8) margin
+    let card_title = format!(" {} {} ", icon, truncate_name(&task.title, max_title));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .title(card_title);
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" id={} ", task.id),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            task.status.as_str().to_string(),
+            Style::default().fg(color),
+        ),
+    ]));
+
+    // cwd line
+    let home = dirs::home_dir()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let display_cwd = if !home.is_empty() && task.cwd.starts_with(&home) {
+        format!("~{}", &task.cwd[home.len()..])
+    } else {
+        task.cwd.clone()
+    };
+    lines.push(Line::from(Span::styled(
+        format!(" {}", truncate_name(&display_cwd, inner_w.saturating_sub(1))),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // Prompt preview if present
+    if let Some(prompt) = &task.prompt {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", truncate_name(prompt, inner_w.saturating_sub(1))),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+/// Same as `render_session_card` but overrides the card title (used when a
+/// session is bound to a kanban task — we prefer task title over pane name).
+pub fn render_session_card_with_title(
+    frame: &mut Frame,
+    sess: &SessionItem,
+    title_override: Option<&str>,
+    is_selected: bool,
+    tick: u32,
+    area: Rect,
+) {
+    // Temporarily swap name in a clone; render_session_card uses sess.name.
+    let mut tmp = sess.clone();
+    if let Some(t) = title_override {
+        tmp.name = t.to_string();
+    }
+    render_session_card(frame, &tmp, is_selected, tick, area);
 }
 
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -484,14 +676,19 @@ pub fn format_usage_spans(app: &App) -> Vec<Span<'static>> {
 }
 
 fn render_help_popup(frame: &mut Frame) {
-    let area = centered_rect(36, 12, frame.area());
+    let area = centered_rect(44, 18, frame.area());
 
     let lines = vec![
-        Line::from(" 🖥 Sessions"),
+        Line::from(" 🖥 Sessions + Kanban"),
         Line::from(""),
         Line::from(" j/k     up/down"),
         Line::from(" Enter   switch pane"),
         Line::from(" 1-9     switch by number"),
+        Line::from(" v       toggle view (auto/kanban/flat)"),
+        Line::from(" a       approve task (review → done)"),
+        Line::from(" R       reject task (review → running)"),
+        Line::from(" T       trash task (or delete session)"),
+        Line::from(" Space   toggle section collapse"),
         Line::from(" p       toggle preview"),
         Line::from(" d       delete session"),
         Line::from(" f       show all/active"),
@@ -581,9 +778,14 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
         return;
     }
 
+    let in_kanban = app.effective_view_mode() == EffectiveView::Kanban;
+
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('f') => app.show_stale = !app.show_stale,
+        KeyCode::Char('v') => {
+            app.cycle_view_mode();
+        }
         KeyCode::Char('p') => {
             app.show_preview = !app.show_preview;
             if app.show_preview {
@@ -591,7 +793,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
             }
         }
         KeyCode::Char('r') => {
-            app.sessions = load_sessions_data(&app.config, app.backend.as_ref());
+            app.reload_all();
             app.usage = load_usage_from_cache(&app.config.data_dir);
         }
         KeyCode::Char('d') => {
@@ -603,26 +805,96 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
                 }
             }
         }
+        KeyCode::Char('a') => {
+            if in_kanban {
+                if let Some(id) = app
+                    .selected_kanban_card()
+                    .and_then(|c| c.task_id().map(String::from))
+                {
+                    if let Err(e) = crate::approve_task(&app.config, &id) {
+                        eprintln!("approve failed: {}", e);
+                    }
+                    app.reload_all();
+                }
+            }
+        }
+        KeyCode::Char('R') => {
+            if in_kanban {
+                if let Some(id) = app
+                    .selected_kanban_card()
+                    .and_then(|c| c.task_id().map(String::from))
+                {
+                    if let Err(e) = crate::reject_task(&app.config, &id) {
+                        eprintln!("reject failed: {}", e);
+                    }
+                    app.reload_all();
+                }
+            }
+        }
+        KeyCode::Char('T') => {
+            if in_kanban {
+                let selected = app.selected_kanban_card();
+                match selected.and_then(|c| c.task_id().map(String::from)) {
+                    Some(id) => {
+                        if let Err(e) = crate::trash_task(&app.config, &id) {
+                            eprintln!("trash failed: {}", e);
+                        }
+                        app.reload_all();
+                    }
+                    None => {
+                        // Session-only card: fall back to delete_session
+                        if let Some(sess) = selected.and_then(|c| c.session()) {
+                            delete_session(sess, &app.config.data_dir);
+                            app.sessions =
+                                load_sessions_data(&app.config, app.backend.as_ref());
+                        }
+                    }
+                }
+            }
+        }
         KeyCode::Up | KeyCode::Char('k') => {
             app.mark_manual_select();
-            app.previous_session();
-            if app.show_preview {
-                update_preview(app);
+            if in_kanban {
+                app.previous_card();
+            } else {
+                app.previous_session();
+                if app.show_preview {
+                    update_preview(app);
+                }
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
             app.mark_manual_select();
-            app.next_session();
-            if app.show_preview {
-                update_preview(app);
+            if in_kanban {
+                app.next_card();
+            } else {
+                app.next_session();
+                if app.show_preview {
+                    update_preview(app);
+                }
             }
         }
         KeyCode::Enter => {
             app.mark_manual_select();
-            let visible = app.visible_sessions();
-            if let Some(idx) = app.session_state.selected() {
-                if idx < visible.len() {
-                    activate_pane(visible[idx], app.backend.as_ref());
+            if in_kanban {
+                if let Some(sess) = app.selected_kanban_card().and_then(|c| c.session()) {
+                    let sess_cloned = sess.clone();
+                    activate_pane(&sess_cloned, app.backend.as_ref());
+                }
+            } else {
+                let visible = app.visible_sessions();
+                if let Some(idx) = app.session_state.selected() {
+                    if idx < visible.len() {
+                        activate_pane(visible[idx], app.backend.as_ref());
+                    }
+                }
+            }
+        }
+        KeyCode::Char(' ') => {
+            // Toggle section collapse: toggle the column containing the selected card
+            if in_kanban {
+                if let Some(col) = app.selected_kanban_card().and_then(|c| c.column()) {
+                    app.toggle_section(col);
                 }
             }
         }
@@ -651,7 +923,7 @@ pub fn run_tui(config: AppConfig) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(config);
-    app.sessions = load_sessions_data(&app.config, app.backend.as_ref());
+    app.reload_all();
 
     let (tx, rx) = mpsc::channel::<AppEvent>();
 
@@ -686,11 +958,14 @@ pub fn run_tui(config: AppConfig) -> Result<()> {
                 let is_sessions = event.paths.iter().any(|p| {
                     p.file_name().map(|n| n == "sessions.json").unwrap_or(false)
                 });
+                let is_tasks = event.paths.iter().any(|p| {
+                    p.file_name().map(|n| n == "tasks.json").unwrap_or(false)
+                });
                 let is_usage = event.paths.iter().any(|p| {
                     p.file_name().map(|n| n == "usage-cache.json").unwrap_or(false)
                 });
 
-                if is_sessions {
+                if is_sessions || is_tasks {
                     thread::sleep(Duration::from_millis(150));
                     let _ = tx_sessions.send(AppEvent::SessionsUpdated);
                 }
@@ -734,6 +1009,10 @@ pub fn run_tui(config: AppConfig) -> Result<()> {
                 if app.config.reaper.enabled && app.tick.is_multiple_of(300) {
                     reap_orphans(&app.config, false);
                 }
+                // Block-alert: evaluate review-stale tasks every 30 seconds.
+                if app.tick.is_multiple_of(30) {
+                    crate::notify::process_block_alerts(&app.config, app.backend.as_ref());
+                }
             }
             Ok(AppEvent::Key(key)) => {
                 if app.show_help {
@@ -743,7 +1022,7 @@ pub fn run_tui(config: AppConfig) -> Result<()> {
                 }
             }
             Ok(AppEvent::SessionsUpdated) => {
-                app.sessions = load_sessions_data(&app.config, app.backend.as_ref());
+                app.reload_all();
                 app.auto_jump_to_waiting();
             }
             Ok(AppEvent::UsageUpdated(usage)) => {

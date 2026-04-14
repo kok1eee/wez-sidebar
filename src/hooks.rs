@@ -6,7 +6,8 @@ use std::{
 };
 
 use crate::config::AppConfig;
-use crate::session::{read_session_store, send_permission_notification, write_session_store};
+use crate::notify::send_permission_notification;
+use crate::session::{read_session_store, write_session_store};
 use crate::terminal::create_backend;
 use crate::types::{HookPayload, Session, SessionTask};
 

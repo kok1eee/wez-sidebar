@@ -89,6 +89,11 @@ pub trait TerminalBackend {
     /// Set the title of the tab containing the given pane. No-op on failure.
     fn set_tab_title(&self, pane_id: i32, title: &str);
 
+    /// Paste `text` into `pane_id`. When `submit` is true, append Enter so the
+    /// recipient treats the text as a submitted line (e.g. a Claude Code
+    /// prompt). Best-effort — errors are swallowed.
+    fn send_text(&self, pane_id: i32, text: &str, submit: bool);
+
     /// Name of the terminal (for diagnostics and logging)
     fn name(&self) -> &str;
 
@@ -253,6 +258,39 @@ impl TerminalBackend for WezTermBackend {
             .output();
     }
 
+    fn send_text(&self, pane_id: i32, text: &str, submit: bool) {
+        if pane_id < 0 {
+            return;
+        }
+        // `cli send-text --no-paste` streams stdin to the pane as typed input,
+        // so any characters (including newlines) are sent verbatim. We pipe
+        // the prompt via stdin to avoid argv quoting pitfalls.
+        use std::io::Write;
+        let mut child = match Command::new(&self.path)
+            .args([
+                "cli",
+                "send-text",
+                "--pane-id",
+                &pane_id.to_string(),
+                "--no-paste",
+            ])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+            if submit {
+                let _ = stdin.write_all(b"\r");
+            }
+        }
+        let _ = child.wait();
+    }
+
     fn name(&self) -> &str {
         "wezterm"
     }
@@ -414,6 +452,25 @@ impl TerminalBackend for TmuxBackend {
             .args(["rename-window", "-t", &format!("%{}", pane_id), title])
             .stderr(Stdio::null())
             .output();
+    }
+
+    fn send_text(&self, pane_id: i32, text: &str, submit: bool) {
+        if pane_id < 0 {
+            return;
+        }
+        // tmux send-keys handles the literal text as one argument; use `-l`
+        // (literal) to avoid keyname interpretation of embedded specials.
+        let target = format!("%{}", pane_id);
+        let _ = Command::new(&self.path)
+            .args(["send-keys", "-t", &target, "-l", text])
+            .stderr(Stdio::null())
+            .output();
+        if submit {
+            let _ = Command::new(&self.path)
+                .args(["send-keys", "-t", &target, "Enter"])
+                .stderr(Stdio::null())
+                .output();
+        }
     }
 
     fn name(&self) -> &str {

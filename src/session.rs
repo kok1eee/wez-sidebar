@@ -1,8 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use std::{collections::HashMap, fs, path::PathBuf, process::Command};
-
-use std::process::Stdio;
+use std::{collections::HashMap, fs, path::PathBuf};
 
 use crate::config::{expand_tilde, AppConfig};
 use crate::terminal::{TerminalBackend, TerminalPane};
@@ -32,56 +30,6 @@ pub fn write_session_store(store: &SessionsFile, data_dir: &str) -> Result<()> {
     fs::write(&tmp_path, data)?;
     fs::rename(&tmp_path, &path)?;
     Ok(())
-}
-
-pub fn send_permission_notification(cwd: &str, tty: &str, backend: &dyn TerminalBackend) {
-    // terminal-notifier が存在しなければスキップ
-    let notifier = match Command::new("which")
-        .arg("terminal-notifier")
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    {
-        Some(path) if !path.is_empty() => path,
-        _ => return,
-    };
-
-    let dir_name = std::path::Path::new(cwd)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-
-    let (activate_cmd, approve_cmd) = match backend.find_pane_by_tty(tty) {
-        Some((tab_id, pane_id)) => (
-            backend.build_activate_command(tab_id, pane_id),
-            backend.build_approve_command(tab_id, pane_id),
-        ),
-        None => (
-            format!("open -a {}", capitalize(backend.name())),
-            format!("open -a {}", capitalize(backend.name())),
-        ),
-    };
-
-    let script = format!(
-        r#"result=$({} -title 'Claude Code' -message '許可待ち: {}' -sound Tink -actions '承認' -sender com.github.wez.wezterm); if [ "$result" = "@ACTIONCLICKED" ]; then {}; elif [ "$result" = "@CONTENTCLICKED" ]; then {}; fi"#,
-        notifier, dir_name, approve_cmd, activate_cmd
-    );
-
-    let _ = Command::new("bash")
-        .args(["-c", &script])
-        .stderr(Stdio::null())
-        .spawn();
-}
-
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        None => String::new(),
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-    }
 }
 
 pub fn load_sessions_data(config: &AppConfig, backend: &dyn TerminalBackend) -> Vec<SessionItem> {

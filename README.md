@@ -27,6 +27,8 @@ This is an intentional scope decision: wez-sidebar is for WezTerm users who run 
 - **Orphan reaper** — Automatically detects and kills orphaned Claude Code processes not attached to any WezTerm pane (opt-in)
 - **Zero polling** — All data flows through hooks → file watcher; no CPU wasted on polling
 - **Spawn new sessions** — `wez-sidebar new <dir>` opens a new tab with Claude Code running in the given directory
+- **Kanban / task management** — Stack tasks in the backlog, link dependencies, see progress across `Active / Review / Done` columns. Approving a task auto-spawns the next dependent task
+- **Block-alert notifications** — Desktop notification when a task sits in `review` too long (anti-neglect)
 
 ## Requirements
 
@@ -152,9 +154,77 @@ wez-sidebar new ~/path/to/repo -- "Fix X in src/foo.rs"
 
 # Pass claude options through
 wez-sidebar new ~/path -- -r
+
+# Spawn with a task (sets claude -n "<title>" and sends an initial prompt)
+wez-sidebar new --task "Design DB schema" --prompt "SQLite + Prisma..."
 ```
 
-The tab title is automatically set to the directory basename.
+The tab title is automatically set to the directory basename. When `--task` is supplied, a kanban task is also created and shown in the `Active` column.
+
+## Kanban / Task Management
+
+For running multiple Claude Code sessions in parallel with visible dependency / status tracking. Inspired by Cline Kanban.
+
+### Workflow
+
+```
+[backlog] ── spawn ──▶ [running] ◀─── UserPromptSubmit ───┐
+                          │ Stop hook                      │
+                          ▼                                │
+                       [review] ───────────────────────────┘
+                          │ a (approve) / auto_approve
+                          ▼
+                       [done]  ── auto-spawns dependent next task
+```
+
+### Task CLI
+
+```bash
+# Add a task to the backlog
+wez-sidebar tasks add "Design DB schema" --cwd ~/repo --prompt "..."
+
+# Link dependency: B can start only after A is done
+wez-sidebar tasks link <A_id> <B_id>
+
+# List (table or JSON)
+wez-sidebar tasks list
+wez-sidebar tasks list --status review --format json
+
+# backlog → running (spawn when dependencies clear)
+wez-sidebar tasks start <id>
+
+# review → done (and auto-spawn dependents)
+wez-sidebar tasks approve <id>
+
+# review → running (send back for more input)
+wez-sidebar tasks reject <id>
+
+# any → trash / trash → backlog
+wez-sidebar tasks trash <id>
+wez-sidebar tasks restore <id>
+
+# Resume a done task via `claude --resume "<title>"`
+wez-sidebar tasks resume <id>
+```
+
+### TUI Operations (kanban mode)
+
+| Key | Action |
+|-----|--------|
+| `v` | Toggle view (auto ↔ kanban ↔ flat) |
+| `a` | Approve selected task (review → done) |
+| `R` | Reject selected task (review → running) |
+| `T` | Trash selected task |
+| `Tab`/`h`/`l` | Move between columns (Active / Review / Done) |
+| `Space` | Toggle section collapse (sidebar) |
+
+### Block-alert Notifications
+
+When a task sits in `review` for more than `block_alert_minutes` (default 5), a macOS notification fires via `terminal-notifier` (sound: Basso). Click to jump to the pane.
+
+### Persistence
+
+Tasks live in `~/.config/wez-sidebar/tasks.json`. The task title equals the Claude Code session name (`claude -n "<title>"`), so renames via `/rename` stay tracked.
 
 ## Card Display
 
@@ -225,6 +295,17 @@ wez-sidebar reap --dry  # Preview orphans without killing
 wez-sidebar reap        # Kill orphaned processes (SIGTERM)
 ```
 
+### Kanban / Notifications
+
+```toml
+[kanban]
+auto_flat_threshold = 3         # Stay flat when session count is below this
+block_alert_minutes = 5         # Threshold for review-staleness alerts (minutes). 0 to disable.
+auto_approve = false            # true = skip review; Stop hook moves task straight to done
+block_alert_sound = "Basso"     # terminal-notifier -sound value
+block_alert_cooldown_secs = 0   # 0 = once per review stint, >0 = re-alert every N seconds
+```
+
 ## Keybindings
 
 | Key | Sidebar | Dock |
@@ -232,7 +313,12 @@ wez-sidebar reap        # Kill orphaned processes (SIGTERM)
 | `j`/`k` | Move up/down | Move up/down |
 | `Enter` | Switch to pane | Switch to pane |
 | `1`-`9` | Switch by number | Switch by number |
-| `Tab`/`h`/`l` | - | Switch column |
+| `Tab`/`h`/`l` | Switch column (kanban) | Switch column |
+| `Space` | Toggle section (kanban) | - |
+| `v` | Toggle view (auto/kanban/flat) | Toggle view |
+| `a` | Approve task (review → done) | Approve task |
+| `R` | Reject task (review → running) | Reject task |
+| `T` | Trash task | Trash task |
 | `p` | Toggle preview | - |
 | `f` | Toggle stale sessions | Toggle stale sessions |
 | `d` | Delete session | Delete session |

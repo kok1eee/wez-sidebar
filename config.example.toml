@@ -45,3 +45,31 @@
 # [reaper]
 # enabled = false
 # threshold_hours = 3
+
+# --------------------------------------------------------------------------
+# Kanban Mode
+# --------------------------------------------------------------------------
+# Kanban view groups sessions by status (Active / Review / Done).
+# Tasks (CLI-managed via `wez-sidebar tasks add`) drive the kanban lifecycle.
+#
+# auto_flat_threshold: below this session count, the UI stays flat even in
+#   kanban-capable layouts. Set to 0 to force kanban whenever tasks exist.
+#
+# block_alert_minutes: a task in "review" longer than this fires a macOS
+#   notification via terminal-notifier. Set to 0 to disable block alerts.
+#
+# auto_approve: skip the review column — tasks move straight from running
+#   to done on Stop hook (Cline Kanban style auto pipeline).
+#
+# block_alert_sound: terminal-notifier sound name (matches `-sound`).
+#
+# block_alert_cooldown_secs: minimum seconds between repeat alerts for the
+#   same task. 0 = alert at most once per review stint (reset when the task
+#   leaves review).
+
+# [kanban]
+# auto_flat_threshold = 3
+# block_alert_minutes = 5
+# auto_approve = false
+# block_alert_sound = "Basso"
+# block_alert_cooldown_secs = 0

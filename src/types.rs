@@ -84,6 +84,169 @@ pub struct SessionItem {
 }
 
 // ============================================================================
+// Kanban Task
+// ============================================================================
+
+/// Kanban task status.
+///
+/// Lifecycle: backlog → running → review → done
+/// Any state can transition to trash (soft delete).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskStatus {
+    Backlog,
+    Running,
+    Review,
+    Done,
+    Trash,
+}
+
+impl TaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TaskStatus::Backlog => "backlog",
+            TaskStatus::Running => "running",
+            TaskStatus::Review => "review",
+            TaskStatus::Done => "done",
+            TaskStatus::Trash => "trash",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "backlog" => Some(TaskStatus::Backlog),
+            "running" => Some(TaskStatus::Running),
+            "review" => Some(TaskStatus::Review),
+            "done" => Some(TaskStatus::Done),
+            "trash" => Some(TaskStatus::Trash),
+            _ => None,
+        }
+    }
+}
+
+/// Kanban task record (persisted to tasks.json).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KanbanTask {
+    /// Short UUID (8 hex chars)
+    pub id: String,
+    /// Display name / `claude -n <title>` value
+    pub title: String,
+    /// Initial prompt to send on spawn (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    pub status: TaskStatus,
+    /// Working directory for spawn
+    pub cwd: String,
+    /// Claude Code session_id (set when bound to a running session)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Creation timestamp (RFC 3339)
+    pub created_at: String,
+    /// When task moved to running (RFC 3339)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// When task moved to review (for block-detection timing)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_started_at: Option<String>,
+    /// When task moved to done
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    /// Block-alert dedupe: timestamp of last block notification fired for this task
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_alerted_at: Option<String>,
+}
+
+/// Task dependency edge: `from` must be done before `to` can start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskDependency {
+    pub from: String,
+    pub to: String,
+}
+
+/// tasks.json root schema.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TasksFile {
+    #[serde(default)]
+    pub tasks: Vec<KanbanTask>,
+    #[serde(default)]
+    pub dependencies: Vec<TaskDependency>,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+// ============================================================================
+// Kanban UI state (Phase 6-7)
+// ============================================================================
+
+/// User-visible kanban view selection.
+///
+/// `Auto` defers the kanban/flat decision to `kanban.auto_flat_threshold`.
+/// `Kanban` and `Flat` force the respective layout until the user toggles
+/// again with the `v` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Auto,
+    Kanban,
+    Flat,
+}
+
+impl ViewMode {
+    /// Cycle: Auto → Kanban → Flat → Auto.
+    pub fn next(self) -> Self {
+        match self {
+            ViewMode::Auto => ViewMode::Kanban,
+            ViewMode::Kanban => ViewMode::Flat,
+            ViewMode::Flat => ViewMode::Auto,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewMode::Auto => "auto",
+            ViewMode::Kanban => "kanban",
+            ViewMode::Flat => "flat",
+        }
+    }
+}
+
+/// Resolved (effective) layout after `ViewMode::Auto` is collapsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveView {
+    Kanban,
+    Flat,
+}
+
+/// Kanban column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KanbanColumn {
+    Active,
+    Review,
+    Done,
+}
+
+impl KanbanColumn {
+    pub const ALL: [KanbanColumn; 3] =
+        [KanbanColumn::Active, KanbanColumn::Review, KanbanColumn::Done];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            KanbanColumn::Active => "Active",
+            KanbanColumn::Review => "Review",
+            KanbanColumn::Done => "Done",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            KanbanColumn::Active => 0,
+            KanbanColumn::Review => 1,
+            KanbanColumn::Done => 2,
+        }
+    }
+}
+
+// ============================================================================
 // Usage (cache read only — data written by statusline script)
 // ============================================================================
 
